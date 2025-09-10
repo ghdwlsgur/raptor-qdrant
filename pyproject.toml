@@ -1,0 +1,21 @@
+[project]
+name = "raptor-qdrant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "loguru>=0.7.3",
+    "openai>=1.107.0",
+    "pydantic-settings>=2.10.1",
+    "qdrant-client>=1.15.1",
+    "sentence-transformers>=5.1.0",
+    "tenacity>=9.1.2",
+    "tiktoken>=0.11.0",
+    "umap-learn>=0.5.0",
+    "scikit-learn>=1.0.0",
+    "numpy>=1.21.0",
+    "tqdm>=4.64.0",
+    "numba>=0.56.0",
+]
