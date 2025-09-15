@@ -45,7 +45,7 @@ class QdrantManager:
     def get_client(self) -> QdrantClient:
         if not self.client:
             raise ConnectionError(
-                "qdrant client is not connected. Please call .connect() method first."
+                "qdrant client is not connected. Please call .connect() method first"
             )
         return self.client
 
@@ -65,6 +65,11 @@ class QdrantManager:
                         size=vector_size,
                         distance=models.Distance.COSINE,
                     ),
+                    sparse_vectors_config={
+                        "text-sparse-new": models.SparseVectorParams(
+                            index=models.SparseIndexParams(on_disk=False)
+                        )
+                    },
                 )
                 self.logger.info(f"created collection '{name}' successfully")
             else:
@@ -83,6 +88,11 @@ class QdrantManager:
                     size=vector_size,
                     distance=models.Distance.COSINE,
                 ),
+                sparse_vectors_config={
+                    "text-sparse-new": models.SparseVectorParams(
+                        index=models.SparseIndexParams(on_disk=False)
+                    )
+                },
             )
             self.logger.info(f"recreated collection '{name}' successfully")
         except Exception as e:

@@ -8,18 +8,15 @@ import tiktoken
 import umap
 from sklearn.mixture import GaussianMixture
 
-# Initialize logging
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
+from src.rag.builder.models.structure import Node
 
-from .tree_structures import Node
-
-# Import necessary methods from other modules (unused imports removed)
-
-# Set a random seed for reproducibility
 RANDOM_SEED = 224
 random.seed(RANDOM_SEED)
 
+logger = logging.getLogger(__name__)
 
+
+# 고차원의 복잡한 데이터를 저차원의 단순한 데이터로 변환
 def global_cluster_embeddings(
     embeddings: np.ndarray,
     dim: int,
@@ -28,21 +25,13 @@ def global_cluster_embeddings(
 ) -> np.ndarray:
     if n_neighbors is None:
         n_neighbors = int((len(embeddings) - 1) ** 0.5)
+
+    # UMAP 알고리즘을 사용해 고차원 임베딩을 저차원(dim)으로 축소
     reduced_embeddings = umap.UMAP(
         n_neighbors=n_neighbors, n_components=dim, metric=metric
     ).fit_transform(embeddings)
-    return reduced_embeddings
 
-
-def local_cluster_embeddings(
-    embeddings: np.ndarray,
-    dim: int,
-    num_neighbors: int = 10,
-    metric: str = "cosine",
-) -> np.ndarray:
-    reduced_embeddings = umap.UMAP(
-        n_neighbors=num_neighbors, n_components=dim, metric=metric
-    ).fit_transform(embeddings)
+    # 저차원으로 축소된 임베딩 반환
     return reduced_embeddings
 
 
@@ -52,25 +41,60 @@ def get_optimal_clusters(
     random_state: int = RANDOM_SEED,
 ) -> int:
     max_clusters = min(max_clusters, len(embeddings))
-    n_clusters = np.arange(1, max_clusters)
+    # 데이터가 너무 적으면 클러스터를 1개로 제한
+    if len(embeddings) <= 3:
+        return 1
+
+    # 최대 클러스터 수를 데이터 수의 절반으로 제한
+    max_clusters = min(max_clusters, len(embeddings) // 2)
+    if max_clusters < 1:
+        return 1
+
+    n_clusters = np.arange(1, max_clusters + 1)
     bics = []
     for n in n_clusters:
-        gm = GaussianMixture(n_components=n, random_state=random_state)
-        gm.fit(embeddings)
-        bics.append(gm.bic(embeddings))
+        try:
+            gm = GaussianMixture(
+                n_components=n,
+                random_state=random_state,
+                reg_covar=1e-6,  # 정규화 파라미터 추가
+                max_iter=100,
+                tol=1e-3,
+            )
+            gm.fit(embeddings)
+            bics.append(gm.bic(embeddings))
+        except ValueError:
+            # 수치적 불안정성으로 실패한 경우 매우 큰 BIC 값을 할당
+            bics.append(np.inf)
+
+    # 유효한 BIC가 없으면 1을 반환
+    if all(bic == np.inf for bic in bics):
+        return 1
+
     optimal_clusters = n_clusters[np.argmin(bics)]
     return optimal_clusters
 
 
-def GMM_cluster(
+def gmm_cluster(
     embeddings: np.ndarray, threshold: float, random_state: int = 0
 ):
     n_clusters = get_optimal_clusters(embeddings)
-    gm = GaussianMixture(n_components=n_clusters, random_state=random_state)
-    gm.fit(embeddings)
-    probs = gm.predict_proba(embeddings)
-    labels = [np.where(prob > threshold)[0] for prob in probs]
-    return labels, n_clusters
+    try:
+        gm = GaussianMixture(
+            n_components=n_clusters,
+            random_state=random_state,
+            reg_covar=1e-6,
+            max_iter=100,
+            tol=1e-3,
+        )
+        gm.fit(embeddings)
+        probs = gm.predict_proba(embeddings)
+        labels = [np.where(prob > threshold)[0] for prob in probs]
+        return labels, n_clusters
+    except ValueError:
+        # GMM이 실패한 경우 모든 포인트를 하나의 클러스터로 할당
+        labels = [np.array([0]) for _ in range(len(embeddings))]
+        return labels, 1
 
 
 def perform_clustering(
@@ -79,12 +103,12 @@ def perform_clustering(
     reduced_embeddings_global = global_cluster_embeddings(
         embeddings, min(dim, len(embeddings) - 2)
     )
-    global_clusters, n_global_clusters = GMM_cluster(
+    global_clusters, n_global_clusters = gmm_cluster(
         reduced_embeddings_global, threshold
     )
 
     if verbose:
-        logging.info(f"Global Clusters: {n_global_clusters}")
+        logger.info(f"global clusters: {n_global_clusters}")
 
     all_local_clusters = [np.array([]) for _ in range(len(embeddings))]
     total_clusters = 0
@@ -93,26 +117,17 @@ def perform_clustering(
         global_cluster_embeddings_ = embeddings[
             np.array([i in gc for gc in global_clusters])
         ]
-        if verbose:
-            logging.info(
-                f"Nodes in Global Cluster {i}: {len(global_cluster_embeddings_)}"
-            )
         if len(global_cluster_embeddings_) == 0:
             continue
         if len(global_cluster_embeddings_) <= dim + 1:
             local_clusters = [np.array([0]) for _ in global_cluster_embeddings_]
             n_local_clusters = 1
         else:
-            reduced_embeddings_local = local_cluster_embeddings(
-                global_cluster_embeddings_, dim
-            )
-            local_clusters, n_local_clusters = GMM_cluster(
+            reduced_embeddings_local = umap.UMAP(
+                n_neighbors=10, n_components=dim, metric="cosine"
+            ).fit_transform(global_cluster_embeddings_)
+            local_clusters, n_local_clusters = gmm_cluster(
                 reduced_embeddings_local, threshold
-            )
-
-        if verbose:
-            logging.info(
-                f"Local Clusters in Global Cluster {i}: {n_local_clusters}"
             )
 
         for j in range(n_local_clusters):
@@ -130,7 +145,7 @@ def perform_clustering(
         total_clusters += n_local_clusters
 
     if verbose:
-        logging.info(f"Total Clusters: {total_clusters}")
+        logger.info(f"total clusters: {total_clusters}")
     return all_local_clusters
 
 
@@ -142,7 +157,7 @@ class ClusteringAlgorithm(ABC):
         pass
 
 
-class RAPTOR_Clustering(ClusteringAlgorithm):
+class RaptorClustering(ClusteringAlgorithm):
     @staticmethod
     def perform_clustering(
         nodes: List[Node],
@@ -189,11 +204,11 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
             # If the total length exceeds the maximum allowed length, recluster this cluster
             if total_length > max_length_in_cluster:
                 if verbose:
-                    logging.info(
+                    logger.info(
                         f"reclustering cluster with {len(cluster_nodes)} nodes"
                     )
                 node_clusters.extend(
-                    RAPTOR_Clustering.perform_clustering(
+                    RaptorClustering.perform_clustering(
                         cluster_nodes,
                         embedding_model_name,
                         max_length_in_cluster,

@@ -1,31 +1,26 @@
 import logging
-import pickle
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-from typing import Dict, List, Set
+from typing import Dict, List
 
-from .cluster_utils import ClusteringAlgorithm, RAPTOR_Clustering
-from .tree_builder import TreeBuilder, TreeBuilderConfig
-from .tree_structures import Node, Tree
-from .utils import (
-    distances_from_embeddings,
-    get_children,
-    get_embeddings,
+import tiktoken
+from .utils import RaptorClustering
+from src.rag.builder.models.structure import Node, Tree
+from src.rag.builder.tree_builder import TreeBuilder, TreeBuilderConfig
+from src.rag.builder.utils import (
     get_node_list,
     get_text,
-    indices_of_nearest_neighbors_from_distances,
-    split_text,
 )
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class ClusterTreeConfig(TreeBuilderConfig):
     def __init__(
         self,
-        reduction_dimension=10,
-        clustering_algorithm=RAPTOR_Clustering,  # Default to RAPTOR clustering
-        clustering_params={},  # Pass additional params as a dict
+        reduction_dimension=10,  # 차원 축소의 목표 차원 수
+        clustering_algorithm=RaptorClustering,  # 클러스터링 알고리즘
+        clustering_params={},  # 선택한 클러스터링 알고리즘에 전달할 추가 매개변수
         *args,
         **kwargs,
     ):
@@ -44,6 +39,14 @@ class ClusterTreeConfig(TreeBuilderConfig):
         return base_summary + cluster_tree_summary
 
 
+# 계층적 트리를 클러스터링 방식으로 구축하는 클래스
+"""
+1. 비슷한 내용의 노드들을 그룹화(클러스터링)
+2. 각 클러스터의 내용을 요약하여 상위 노드(요약 노드) 생성
+3. 이 과정을 반복하여 트리의 최상위 노드에 도달
+"""
+
+
 class ClusterTreeBuilder(TreeBuilder):
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -53,9 +56,10 @@ class ClusterTreeBuilder(TreeBuilder):
         self.reduction_dimension = config.reduction_dimension
         self.clustering_algorithm = config.clustering_algorithm
         self.clustering_params = config.clustering_params
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
         logging.info(
-            f"Successfully initialized ClusterTreeBuilder with Config {config.log_config()}"
+            f"initialized ClusterTreeBuilder with config: {config.log_config()}"
         )
 
     def construct_tree(
@@ -64,10 +68,11 @@ class ClusterTreeBuilder(TreeBuilder):
         layer_to_nodes: Dict[int, List[Node]],
         use_multithreading: bool = False,
     ) -> Dict[int, Node]:
-        logging.info("Using Cluster TreeBuilder")
+        logging.info("using cluster tree builder")
 
         # Initialize current_level_nodes with leaf nodes (layer 0)
         current_level_nodes = {node.index: node for node in layer_to_nodes[0]}
+        # 새로 만들 노드의 인덱스는 기존 노드 수에서 시작
         next_node_index = len(all_tree_nodes)
 
         def process_cluster(
@@ -78,14 +83,16 @@ class ClusterTreeBuilder(TreeBuilder):
             lock,
         ):
             node_texts = get_text(cluster)
-
             summarized_text = self.summarize(
                 context=node_texts,
                 max_tokens=summarization_length,
             )
 
             logging.info(
-                f"Node Texts Length: {len(self.tokenizer.encode(node_texts))}, Summarized Text Length: {len(self.tokenizer.encode(summarized_text))}"
+                f"node texts character length: {len(node_texts)}"
+            )
+            logging.info(
+                f"summarized text character length: {len(summarized_text)}"
             )
 
             _, new_parent_node = self.create_node(
@@ -97,32 +104,33 @@ class ClusterTreeBuilder(TreeBuilder):
             with lock:
                 new_level_nodes[next_node_index] = new_parent_node
 
+        # 설정된 레이어 수만큼 반복
         for layer in range(self.num_layers):
-
             new_level_nodes = {}
-
-            logging.info(f"Constructing Layer {layer}")
+            logging.info(f"constructing layer {layer}")
 
             node_list_current_layer = get_node_list(current_level_nodes)
 
+            # 노드가 너무 적으면 더 이상 레이어를 만들 수 없으므로 중지
             if len(node_list_current_layer) <= self.reduction_dimension + 1:
                 self.num_layers = layer
                 logging.info(
-                    f"Stopping Layer construction: Cannot Create More Layers. Total Layers in tree: {layer}"
+                    "stopping layer construction: cannot create more layers"
                 )
                 break
 
+            # 현재 레이어의 노드들을 클러스터링
             clusters = self.clustering_algorithm.perform_clustering(
                 node_list_current_layer,
                 self.cluster_embedding_model,
                 reduction_dimension=self.reduction_dimension,
+                tokenizer=self.tokenizer,
                 **self.clustering_params,
             )
 
             lock = Lock()
-
             summarization_length = self.summarization_length
-            logging.info(f"Summarization Length: {summarization_length}")
+            logging.info(f"summarization length: {summarization_length}")
 
             if use_multithreading:
                 with ThreadPoolExecutor() as executor:

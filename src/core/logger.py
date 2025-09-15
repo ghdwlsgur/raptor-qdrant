@@ -1,7 +1,5 @@
 import logging
 import sys
-from types import FrameType
-from typing import Optional
 from loguru import logger
 from src.core.config import settings
 
@@ -13,22 +11,32 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             level = record.levelno
 
-        frame: Optional[FrameType] = logging.currentframe()
-        depth = 2
-        while frame and frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
-            depth += 1
-
-        logger.opt(depth=depth, exception=record.exc_info).log(
-            level, record.getMessage()
-        )
+        # 원래 logging record의 위치 정보 사용
+        logger.patch(
+            lambda r: r.update(
+                name=record.name,
+                module=record.module,
+                function=record.funcName,
+                line=record.lineno,
+                file=record.pathname,
+            )
+        ).log(level, record.getMessage())
 
 
 def configure_logging():
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    # 모든 기존 핸들러 제거
+    logging.root.handlers.clear()
+    
+    # 모든 기존 로거의 핸들러를 제거
     for name in logging.root.manager.loggerDict:
-        if name.startswith("uvicorn."):
-            logging.getLogger(name).handlers = []
+        logger_obj = logging.getLogger(name)
+        logger_obj.handlers.clear()
+        logger_obj.propagate = True  # 부모 로거로 전파하도록 설정
+    
+    # 루트 로거에만 InterceptHandler 추가
+    intercept_handler = InterceptHandler()
+    logging.root.addHandler(intercept_handler)
+    logging.root.setLevel(logging.DEBUG)
 
     logger.remove()
 
