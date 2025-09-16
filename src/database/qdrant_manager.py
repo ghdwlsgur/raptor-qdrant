@@ -1,8 +1,9 @@
 import threading
 import logging
 from typing import Optional
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 from src.core.config import settings
+from .constants import create_vector_config, get_sparse_vector_config
 
 
 class QdrantManager:
@@ -61,19 +62,8 @@ class QdrantManager:
                 )
                 client.create_collection(
                     collection_name=name,
-                    # [Dense Vector]
-                    vectors_config=models.VectorParams(
-                        size=vector_size,
-                        distance=models.Distance.COSINE,
-                    ),
-                    # [Sparse Vector]
-                    # 하이브리드 검색을 위한 sparse vector 설정 (BM25)
-                    sparse_vectors_config={
-                        # sparse vector 인덱스를 디스크가 아닌 메모리에 생성
-                        "text-sparse-new": models.SparseVectorParams(
-                            index=models.SparseIndexParams(on_disk=False)
-                        )
-                    },
+                    vectors_config=create_vector_config(vector_size),
+                    sparse_vectors_config=get_sparse_vector_config(),
                 )
                 self.logger.info(f"created collection '{name}' successfully")
             else:
@@ -88,17 +78,8 @@ class QdrantManager:
             self.logger.info(f"recreating collection '{name}'")
             client.recreate_collection(
                 collection_name=name,
-                # [Dense Vector]
-                vectors_config=models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-                # [Sparse Vector]
-                sparse_vectors_config={
-                    "text-sparse-new": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
-                    )
-                },
+                vectors_config=create_vector_config(vector_size),
+                sparse_vectors_config=get_sparse_vector_config(),
             )
             self.logger.info(f"recreated collection '{name}' successfully")
         except Exception as e:

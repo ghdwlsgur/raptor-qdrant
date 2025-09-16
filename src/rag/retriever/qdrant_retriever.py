@@ -13,6 +13,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from .base_retriever import BaseRetriever
 from src.database.qdrant_manager import QdrantManager
+from src.database.constants import DEFAULT_SPARSE_VECTOR_CONFIG
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from src.rag.builder.models.structure import Tree
 
@@ -74,16 +75,11 @@ class QdrantRetriever(BaseRetriever):
         self.tokenizer = config.tokenizer
         self.question_embedding_model = config.question_embedding_model
         self.embedding_model = config.embedding_model
-
         self.manager = QdrantManager()
         self.client: QdrantClient = self.manager.get_client()
         self.vector_store = None
         self.index = None
         self.retriever = None
-
-        logger.info(
-            f"initialized qdrant retriever for collection: '{self.config.collection_name}'"
-        )
         self.manager.create_collection_if_not_exists(
             self.config.collection_name, self.config.vector_size
         )
@@ -92,6 +88,12 @@ class QdrantRetriever(BaseRetriever):
     def collection_name(self) -> str:
         """컴렉션 이름을 반환"""
         return self.config.collection_name
+
+    def _setup_llama_embedding(self):
+        """임베딩 모델을 LlamaIndex Settings에 설정"""
+        model_id = self.embedding_model.model_name
+        llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
+        Settings.embed_model = llama_embed_model
 
     def build_from_tree(
         self,
@@ -116,17 +118,11 @@ class QdrantRetriever(BaseRetriever):
                     size=self.config.vector_size,
                     distance=models.Distance.COSINE,
                 ),
-                sparse_vectors_config={
-                    "text-sparse-new": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
-                    )
-                },
+                sparse_vectors_config=DEFAULT_SPARSE_VECTOR_CONFIG,
             )
 
         # LlamaIndex Settings에 임베딩 모델 설정
-        model_id = self.embedding_model.model_name
-        llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
-        Settings.embed_model = llama_embed_model
+        self._setup_llama_embedding()
 
         # LlamaIndex TextNode 객체들 생성
         text_nodes = []
@@ -174,9 +170,7 @@ class QdrantRetriever(BaseRetriever):
     def _initialize_retriever(self):
         """LlamaIndex Retriever 초기화"""
         # LlamaIndex Settings에 임베딩 모델 설정
-        model_id = self.embedding_model.model_name
-        llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
-        Settings.embed_model = llama_embed_model
+        self._setup_llama_embedding()
 
         if self.index is None:
             # 기존 컬렉션이 있으면 로드

@@ -36,7 +36,7 @@ class EngineConfig:
         max_tokens_per_chunk: int = 512,
         max_context_tokens: int = 3500,
         top_k: int = 5,
-        hybrid_alpha: float = 0.7,
+        hybrid_alpha: float = 0.8,
     ):
         if not collection_name:
             raise ValueError("collection_name must be provided and non-empty")
