@@ -30,7 +30,7 @@ class QdrantRetrieverConfig:
         tokenizer: Optional[Encoding] = None,
         embedding_model_string: Optional[str] = None,
         collection_name: str = "default_collection",
-        hybrid_alpha: float = 0.7,
+        hybrid_alpha: float = 0.8,
     ):
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")

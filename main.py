@@ -25,7 +25,7 @@ def main():
 
     # 3. RAG 파이프라인 설정
     config = EngineConfig(
-        collection_name="cinderella_story",  # 컬렉션 이름을 문서 내용에 맞게 변경
+        collection_name="sample",  # 컬렉션 이름을 문서 내용에 맞게 변경
         top_k=10,  # 검색할 청크 개수 (증가)
         max_tokens_per_chunk=512,  # 텍스트를 나눌 청크의 최대 토큰 크기 (증가)
         max_context_tokens=4000,  # 컨텍스트 토큰 수 (증가)
@@ -35,9 +35,8 @@ def main():
     engine = RaptorEngine(config)
     logger.info("rag pipeline initialized")
 
-
     # 5. 파일에서 문서 읽어오기
-    file_path = "data/sample_ko.txt"
+    file_path = "data/sample.md"
     if not os.path.exists(file_path):
         logger.error(
             f"File not found: {file_path}. Please create this file with the Cinderella story."
@@ -50,7 +49,7 @@ def main():
     # 6. 문서 인덱싱 실행
     # 이 과정에서 RAPTOR 트리가 생성되고, 모든 노드가 Qdrant에 저장됩니다.
     logger.info("starting to add and index the document...")
-    engine.add_document(document_text, document_name="Cinderella Story")
+    engine.add_document(document_text, document_name="Sample Test")
     logger.info("document indexing finished")
 
     # 7. 문서 내용에 대한 질문 및 답변 생성
@@ -60,11 +59,18 @@ def main():
     #     "What did the prince use to find Cinderella?",
     #     "How were the step-sisters punished in the end?",
     # ]
+    # questions = [
+    #     "신데렐라는 누구인가요?",
+    #     "신데렐라의 의붓언니들은 축제 전에 신데렐라에게 무엇을 하라고 시켰나요?",
+    #     "왕자는 신데렐라를 찾기 위해 무엇을 사용했나요?",
+    #     "마지막에 의붓언니들은 어떻게 벌을 받았나요?",
+    # ]
     questions = [
-        "신데렐라는 누구인가요?",
-        "신데렐라의 의붓언니들은 축제 전에 신데렐라에게 무엇을 하라고 시켰나요?",
-        "왕자는 신데렐라를 찾기 위해 무엇을 사용했나요?",
-        "마지막에 의붓언니들은 어떻게 벌을 받았나요?",
+        "텍스트 마이닝의 4단계 과정을 순서대로 알려주세요",
+        "비정형(Unstructured) 데이터가 정형(Structured) 데이터로 변환되는 예시 표에서, 이름이 'Linh'인 사람의 나이는 몇 살인가요?",
+        "천연 화장품'의 연관어 분석 표에서, '효능/효과'의 세부 키워드 중 가장 수치가 높은 것은 무엇이며 그 값은 얼마인가요?",
+        "텍스트 분석의 '과업(Task)'으로 언급되지 않은 것을 고르세요: 1) 문서 요약, 2) 감성 분석, 3) 이미지 인식, 4) 기계 번역",
+        "텍스트 데이터 수집에서 '인간'은 어떤 역할을 담당하며, 이는 온도계나 위치 센서와 같은 일반적인 센서와 어떻게 다른가요?",
     ]
 
     for question in questions:

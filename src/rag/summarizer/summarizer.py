@@ -37,8 +37,8 @@ class BedrockSummarizer(BaseSummarizationModel):
                 f"Concise Summary:"
             )
 
-            summary = self.bedrock_client.generate_response(
-                prompt, max_tokens=max_tokens
+            summary = self.bedrock_client.answer(
+                context="", question=prompt
             )
             return summary.strip() if summary else ""
 

@@ -4,6 +4,16 @@ from loguru import logger
 from src.core.config import settings
 
 
+def kst_formatter(record):
+    """한국 시간으로 포맷팅"""
+    from datetime import timezone, timedelta
+
+    # UTC+9 (한국 표준시)
+    kst = timezone(timedelta(hours=9))
+    record["time"] = record["time"].astimezone(kst)
+    return record
+
+
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -26,13 +36,13 @@ class InterceptHandler(logging.Handler):
 def configure_logging():
     # 모든 기존 핸들러 제거
     logging.root.handlers.clear()
-    
+
     # 모든 기존 로거의 핸들러를 제거
     for name in logging.root.manager.loggerDict:
         logger_obj = logging.getLogger(name)
         logger_obj.handlers.clear()
         logger_obj.propagate = True  # 부모 로거로 전파하도록 설정
-    
+
     # 루트 로거에만 InterceptHandler 추가
     intercept_handler = InterceptHandler()
     logging.root.addHandler(intercept_handler)
@@ -52,6 +62,7 @@ def configure_logging():
             enqueue=True,
             backtrace=False,
             diagnose=False,
+            filter=kst_formatter,
         )
     else:
         log_format = (
@@ -68,6 +79,7 @@ def configure_logging():
             enqueue=True,
             backtrace=True,
             diagnose=True,
+            filter=kst_formatter,
         )
 
     logger.info(f"logging system is configured successfully: {environment}")

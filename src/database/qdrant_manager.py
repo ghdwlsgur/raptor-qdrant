@@ -61,11 +61,15 @@ class QdrantManager:
                 )
                 client.create_collection(
                     collection_name=name,
+                    # [Dense Vector]
                     vectors_config=models.VectorParams(
                         size=vector_size,
                         distance=models.Distance.COSINE,
                     ),
+                    # [Sparse Vector]
+                    # 하이브리드 검색을 위한 sparse vector 설정 (BM25)
                     sparse_vectors_config={
+                        # sparse vector 인덱스를 디스크가 아닌 메모리에 생성
                         "text-sparse-new": models.SparseVectorParams(
                             index=models.SparseIndexParams(on_disk=False)
                         )
@@ -84,10 +88,12 @@ class QdrantManager:
             self.logger.info(f"recreating collection '{name}'")
             client.recreate_collection(
                 collection_name=name,
+                # [Dense Vector]
                 vectors_config=models.VectorParams(
                     size=vector_size,
                     distance=models.Distance.COSINE,
                 ),
+                # [Sparse Vector]
                 sparse_vectors_config={
                     "text-sparse-new": models.SparseVectorParams(
                         index=models.SparseIndexParams(on_disk=False)

@@ -6,7 +6,7 @@ from src.core.config import settings
 from src.rag.summarizer import BaseSummarizationModel, BedrockSummarizer
 from .embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from .llm.bedrock import BaseChatbotModel, AmazonBedrock
-from .builder.cluster.tree_builder import (
+from .builder.cluster.cluster_builder import (
     ClusterTreeBuilder,
     ClusterTreeConfig,
 )

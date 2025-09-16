@@ -1,6 +1,7 @@
 import json
 import logging
 import boto3
+from botocore.config import Config
 
 from abc import ABC, abstractmethod
 from tenacity import retry, stop_after_attempt, wait_random_exponential
@@ -30,9 +31,19 @@ class AmazonBedrock(BaseChatbotModel):
         self.max_tokens = max_tokens
 
         try:
+            # Connection pool 설정을 통해 동시 연결 수 증가
+            config = Config(
+                region_name=self.region,
+                retries={
+                    'max_attempts': 3,
+                    'mode': 'adaptive'
+                },
+                max_pool_connections=50,  # 기본값 10에서 50으로 증가
+            )
+
             self.bedrock_runtime = boto3.client(
                 "bedrock-runtime",
-                region_name=self.region,
+                config=config,
             )
             logger.info(
                 f"amazon bedrock client initialized with model: {self.model_id}"
@@ -55,7 +66,7 @@ class AmazonBedrock(BaseChatbotModel):
         ]
 
     @retry(
-        wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(3)
+        wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(3)
     )
     def answer(self, context: str, question: str) -> str:
         messages = self._create_prompt(context, question)
