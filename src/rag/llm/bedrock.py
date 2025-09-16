@@ -1,9 +1,9 @@
 import json
 import logging
 import boto3
-from botocore.config import Config
 
 from abc import ABC, abstractmethod
+from botocore.config import Config
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from src.core.config import settings
 
@@ -34,11 +34,8 @@ class AmazonBedrock(BaseChatbotModel):
             # Connection pool 설정을 통해 동시 연결 수 증가
             config = Config(
                 region_name=self.region,
-                retries={
-                    'max_attempts': 3,
-                    'mode': 'adaptive'
-                },
-                max_pool_connections=50,  # 기본값 10에서 50으로 증가
+                retries={'max_attempts': 3, 'mode': 'adaptive'},
+                max_pool_connections=50,
             )
 
             self.bedrock_runtime = boto3.client(

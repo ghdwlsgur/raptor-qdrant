@@ -3,13 +3,12 @@ from typing import List
 import tiktoken
 
 from llama_index.core import Document
+from llama_index.core.schema import TextNode
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.node_parser import (
     SemanticSplitterNodeParser,
     MarkdownNodeParser,
 )
-from llama_index.core.schema import TextNode
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-
 from src.rag.embedding import BaseEmbeddingModel
 
 

@@ -111,7 +111,7 @@ class ClusterTreeBuilder(TreeBuilder):
             if len(node_list_current_layer) <= self.reduction_dimension + 1:
                 self.num_layers = layer
                 logging.info(
-                    "stopping at layer {layer} due to insufficient nodes for clustering"
+                    f"stopping at layer {layer} due to insufficient nodes for clustering"
                 )
                 break
 

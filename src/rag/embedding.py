@@ -19,6 +19,12 @@ class BaseEmbeddingModel(ABC):
         """텍스트를 임베딩 벡터로 변환"""
         pass
 
+    @property
+    @abstractmethod
+    def embedding_dimension(self) -> int:
+        """임베딩 벡터의 차원 수를 반환"""
+        pass
+
 
 # https://huggingface.co/nlpai-lab/KURE-v1
 # https://huggingface.co/nlpai-lab/KoE5
@@ -32,6 +38,11 @@ class KoreanEmbeddingModel(BaseEmbeddingModel):
         except Exception as e:
             logger.error(f"failed to load embedding model {model_name}: {e}")
             raise ValueError(f"failed to initialize embedding model: {e}")
+
+    @property
+    def embedding_dimension(self) -> int:
+        """임베딩 벡터의 차원 수를 반환"""
+        return self.model.get_sentence_embedding_dimension()
 
     def create_embedding(self, text: str) -> List[float]:
         """텍스트를 임베딩 벡터로 변환"""

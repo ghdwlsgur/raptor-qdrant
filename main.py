@@ -74,7 +74,9 @@ def main():
     ]
 
     for question in questions:
+        # answer 메서드가 내부적으로 retrieve를 호출하므로 중복 제거
         answer = engine.answer(question)
+        # 디버그용으로 검색 정보를 별도로 가져옴 (실제로는 중복이지만 정보 표시용)
         _, layer_info = engine.retrieve(question)
         print(f"\n🔍 Retrieved Context (from {len(layer_info)} chunks):")
         for i, info in enumerate(layer_info[:3]):  # 상위 3개만 출력

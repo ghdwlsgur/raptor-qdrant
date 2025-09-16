@@ -57,15 +57,14 @@ class QdrantRetrieverConfig:
             question_embedding_model or self.embedding_model
         )
         self.tokenizer = tokenizer or tiktoken.get_encoding("cl100k_base")
-        self.embedding_model_string = embedding_model_string or "SBert"
+        self.embedding_model_string = (
+            embedding_model_string or self.embedding_model.model_name
+        )
         self.collection_name = collection_name
         self.hybrid_alpha = hybrid_alpha  # 0: 키워드 검색, 1: 벡터 검색
-
-        self.vector_size = len(
-            self.embedding_model.create_embedding("test vector size")
-        )
+        self.vector_size = self.embedding_model.embedding_dimension
         logger.info(
-            f"Vector size for collection '{self.collection_name}' is set to {self.vector_size}"
+            f"vector size for collection '{self.collection_name}' is set to {self.vector_size}"
         )
 
 
@@ -78,20 +77,21 @@ class QdrantRetriever(BaseRetriever):
 
         self.manager = QdrantManager()
         self.client: QdrantClient = self.manager.get_client()
-        self.collection_name = config.collection_name
-        self.vector_size = config.vector_size
-
-        # LlamaIndex
         self.vector_store = None
         self.index = None
         self.retriever = None
 
         logger.info(
-            f"initialized qdrant retriever for collection: '{self.collection_name}'"
+            f"initialized qdrant retriever for collection: '{self.config.collection_name}'"
         )
         self.manager.create_collection_if_not_exists(
-            self.collection_name, self.vector_size
+            self.config.collection_name, self.config.vector_size
         )
+
+    @property
+    def collection_name(self) -> str:
+        """컴렉션 이름을 반환"""
+        return self.config.collection_name
 
     def build_from_tree(
         self,
@@ -111,9 +111,10 @@ class QdrantRetriever(BaseRetriever):
 
         if not append_mode:
             self.client.recreate_collection(
-                collection_name=self.collection_name,
+                collection_name=self.config.collection_name,
                 vectors_config=models.VectorParams(
-                    size=self.vector_size, distance=models.Distance.COSINE
+                    size=self.config.vector_size,
+                    distance=models.Distance.COSINE,
                 ),
                 sparse_vectors_config={
                     "text-sparse-new": models.SparseVectorParams(
@@ -151,7 +152,7 @@ class QdrantRetriever(BaseRetriever):
         # QdrantVectorStore 생성 (하이브리드 검색 지원)
         self.vector_store = QdrantVectorStore(
             client=self.client,
-            collection_name=self.collection_name,
+            collection_name=self.config.collection_name,
             enable_hybrid=True,  # 하이브리드 검색 활성화
             batch_size=64,
         )
@@ -181,7 +182,7 @@ class QdrantRetriever(BaseRetriever):
             # 기존 컬렉션이 있으면 로드
             self.vector_store = QdrantVectorStore(
                 client=self.client,
-                collection_name=self.collection_name,
+                collection_name=self.config.collection_name,
                 enable_hybrid=True,  # 하이브리드 검색 활성화
                 batch_size=64,
             )
@@ -276,7 +277,7 @@ class QdrantRetriever(BaseRetriever):
         )
 
         scroll_result = self.client.scroll(
-            collection_name=self.collection_name,
+            collection_name=self.config.collection_name,
             scroll_filter=search_filter,
             with_payload=True,
             with_vectors=False,
@@ -304,7 +305,7 @@ class QdrantRetriever(BaseRetriever):
         point_ids = [point["id"] for point in points]
 
         self.client.delete(
-            collection_name=self.collection_name,
+            collection_name=self.config.collection_name,
             points_selector=models.PointIdsList(points=point_ids),
             wait=True,
         )
@@ -318,11 +319,11 @@ class QdrantRetriever(BaseRetriever):
         """하이브리드 검색을 위한 Full-Text Index 생성"""
         try:
             self.client.create_payload_index(
-                collection_name=self.collection_name,
+                collection_name=self.config.collection_name,
                 field_name="text",
                 field_schema=models.TextIndexParams(
                     type="text",
-                    tokenizer=models.TokenizerType.MULTILINGUAL,  # 한국어 지원
+                    tokenizer=models.TokenizerType.MULTILINGUAL,
                     lowercase=True,
                 ),
             )
