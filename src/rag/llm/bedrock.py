@@ -13,6 +13,7 @@ from src.rag.constants import (
     BEDROCK_MAX_POOL_CONNECTIONS,
     BEDROCK_MAX_RETRIES,
 )
+from src.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +76,18 @@ class AmazonBedrock(BaseChatbotModel):
             raise ValueError(f"failed to initialize bedrock client: {e}")
 
     def _create_prompt(self, context: str, question: str) -> list:
+        prompt_template = load_prompt("prompt/chatbot.md")
+        formatted_prompt = prompt_template.format(
+            context=context, question=question
+        )
+
         return [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": f"다음 컨텍스트를 바탕으로 질문에 답해주세요.\n\n컨텍스트:\n{context}\n\n질문: {question}\n\n질문과 같은 언어로 정확하고 완전한 답변을 제공해주세요.",
+                        "text": formatted_prompt,
                     }
                 ],
             }
