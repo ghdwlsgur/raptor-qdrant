@@ -1,21 +1,26 @@
 import uuid
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
-import tiktoken
 from qdrant_client import QdrantClient, models
-from tiktoken.core import Encoding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core import VectorStoreIndex, Settings
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import TextNode, NodeWithScore
 from llama_index.core.vector_stores.types import VectorStoreQueryMode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from .base_retriever import BaseRetriever
 from src.database.qdrant_manager import QdrantManager
-from src.database.constants import DEFAULT_SPARSE_VECTOR_CONFIG
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from src.rag.builder.models.structure import Tree
+from src.rag.constants import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TOP_K,
+    DEFAULT_COLLECTION_NAME,
+    DEFAULT_HYBRID_ALPHA,
+    DEFAULT_BATCH_SIZE,
+)
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,108 +28,124 @@ logger = logging.getLogger(__name__)
 class QdrantRetrieverConfig:
     def __init__(
         self,
-        max_tokens: int = 512,
-        max_context_tokens: int = 3500,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         embedding_model: Optional[BaseEmbeddingModel] = None,
-        question_embedding_model: Optional[BaseEmbeddingModel] = None,
-        top_k: int = 5,
-        tokenizer: Optional[Encoding] = None,
-        embedding_model_string: Optional[str] = None,
-        collection_name: str = "default_collection",
-        hybrid_alpha: float = 0.8,
+        top_k: int = DEFAULT_TOP_K,
+        collection_name: str = DEFAULT_COLLECTION_NAME,
+        hybrid_alpha: float = DEFAULT_HYBRID_ALPHA,
     ):
+        """Retriever 설정 객체
+
+        Args:
+            max_tokens (int, optional): 검색 컨텍스트의 최대 토큰 수
+            embedding_model (Optional[BaseEmbeddingModel], optional): 임베딩 모델
+            top_k (int, optional): DB에서 검색할 가장 유사한 문서 개수
+            collection_name (str, optional): Qdrant 컬렉션 이름
+            hybrid_alpha (float, optional): 하이브리드 검색 가중치 (0: 키워드, 1: 벡터)
+        """
+        self._validate_parameters(max_tokens, top_k, embedding_model)
+
+        self.top_k = top_k
+        self.max_tokens = max_tokens
+        self.embedding_model = embedding_model or KoreanEmbeddingModel()
+        self.embedding_model_string = settings.EMBEDDING_MODEL_STRING
+        self.collection_name = collection_name
+        # 0에 가까울 수록 텍스트 유사도 기반 검색, 1에 가까울 수록 의미 기반 검색
+        self.hybrid_alpha = hybrid_alpha
+        self.vector_size = self.embedding_model.embedding_dimension
+
+    def _validate_parameters(
+        self,
+        max_tokens: int,
+        top_k: int,
+        embedding_model: Optional[BaseEmbeddingModel],
+    ) -> None:
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
+
         if embedding_model is not None and not isinstance(
             embedding_model, BaseEmbeddingModel
         ):
             raise ValueError(
                 "embedding_model must be an instance of BaseEmbeddingModel"
             )
-        if question_embedding_model is not None and not isinstance(
-            question_embedding_model, BaseEmbeddingModel
-        ):
-            raise ValueError(
-                "question_embedding_model must be an instance of BaseEmbeddingModel"
-            )
 
-        self.top_k = top_k
-        self.max_tokens = max_tokens
-        self.max_context_tokens = max_context_tokens
-        self.embedding_model = embedding_model or KoreanEmbeddingModel()
-        self.question_embedding_model = (
-            question_embedding_model or self.embedding_model
-        )
-        self.tokenizer = tokenizer or tiktoken.get_encoding("cl100k_base")
-        self.embedding_model_string = (
-            embedding_model_string or self.embedding_model.model_name
-        )
-        self.collection_name = collection_name
-        self.hybrid_alpha = hybrid_alpha  # 0: 키워드 검색, 1: 벡터 검색
-        self.vector_size = self.embedding_model.embedding_dimension
-        logger.info(
-            f"vector size for collection '{self.collection_name}' is set to {self.vector_size}"
-        )
+    @property
+    def vector_store_config(self) -> Dict[str, Any]:
+        return {
+            "collection_name": self.collection_name,
+            "enable_hybrid": True,
+            "batch_size": DEFAULT_BATCH_SIZE,
+        }
 
 
 class QdrantRetriever(BaseRetriever):
+    """Qdrant 벡터 데이터베이스를 사용하는 RAPTOR RAG 시스템의 Retriever 클래스"""
+
     def __init__(self, config: QdrantRetrieverConfig):
         self.config = config
-        self.tokenizer = config.tokenizer
-        self.question_embedding_model = config.question_embedding_model
         self.embedding_model = config.embedding_model
+        self._initialize_qdrant_components()
+        self._initialize_llama_index_components()
+
+    @property
+    def collection_name(self) -> str:
+        return self.config.collection_name
+
+    def _initialize_qdrant_components(self) -> None:
         self.manager = QdrantManager()
         self.client: QdrantClient = self.manager.get_client()
-        self.vector_store = None
-        self.index = None
-        self.retriever = None
         self.manager.create_collection_if_not_exists(
             self.config.collection_name, self.config.vector_size
         )
 
-    @property
-    def collection_name(self) -> str:
-        """컴렉션 이름을 반환"""
-        return self.config.collection_name
+    def _initialize_llama_index_components(self) -> None:
+        self.vector_store = None
+        self.index = None
+        self.retriever = None
 
-    def _setup_llama_embedding(self):
-        """임베딩 모델을 LlamaIndex Settings에 설정"""
-        model_id = self.embedding_model.model_name
-        llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
-        Settings.embed_model = llama_embed_model
+    def _initialize_retriever(self) -> None:
+        """Initialize LlamaIndex Retriever."""
+        try:
+            self._setup_llama_embedding()
 
-    def build_from_tree(
-        self,
-        tree: Tree,
-        document_name: Optional[str] = None,
-        append_mode: bool = False,
-    ):
-        """
-        RAPTOR Tree 객체로부터 Qdrant 컬렉션을 구축합니다.
-        append_mode=False: 기존 컬렉션을 삭제하고 새로 만듭니다.
-        append_mode=True: 기존 컬렉션에 추가합니다.
-        """
-        all_nodes = list(tree.all_nodes.values())
-        logger.info(
-            f"Building index from a tree with {len(all_nodes)} total nodes."
-        )
+            if self.index is None:
+                self._load_existing_collection()
 
-        if not append_mode:
-            self.client.recreate_collection(
-                collection_name=self.config.collection_name,
-                vectors_config=models.VectorParams(
-                    size=self.config.vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-                sparse_vectors_config=DEFAULT_SPARSE_VECTOR_CONFIG,
+            self.retriever = self.index.as_retriever(
+                similarity_top_k=self.config.top_k,
+                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+                alpha=self.config.hybrid_alpha,
             )
+            logger.debug("retriever initialized successfully")
+        except Exception as e:
+            logger.error(f"failed to initialize retriever: {e}")
+            raise
 
-        # LlamaIndex Settings에 임베딩 모델 설정
-        self._setup_llama_embedding()
+    def _load_existing_collection(self) -> None:
+        """Qdrant에 이미 존재하는 컬렉션을 로드"""
+        self.vector_store = QdrantVectorStore(
+            client=self.client, **self.config.vector_store_config
+        )
+        self.index = VectorStoreIndex.from_vector_store(self.vector_store)
+        logger.debug("loaded existing collection")
 
-        # LlamaIndex TextNode 객체들 생성
+    def _setup_llama_embedding(self) -> None:
+        """LlamaIndex의 임베딩 모델 등록"""
+        try:
+            model_id = self.embedding_model.model_name
+            llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
+            Settings.embed_model = llama_embed_model
+            logger.debug(f"embedding model set to: {model_id}")
+        except Exception as e:
+            logger.error(f"failed to setup LlamaIndex embedding model: {e}")
+            raise
+
+    def _create_text_nodes(
+        self, all_nodes: List[Any], tree: Tree, document_name: Optional[str]
+    ) -> List[TextNode]:
         text_nodes = []
         for node in all_nodes:
             layer = tree.get_node_layer(node.index)
@@ -133,9 +154,11 @@ class QdrantRetriever(BaseRetriever):
                 "node_index": node.index,
             }
 
-            # document_name이 제공된 경우 메타데이터에 추가
             if document_name:
                 metadata["document_name"] = document_name
+
+            if hasattr(node, 'metadata') and node.metadata:
+                metadata.update(node.metadata)
 
             text_node = TextNode(
                 text=node.text,
@@ -145,186 +168,120 @@ class QdrantRetriever(BaseRetriever):
             )
             text_nodes.append(text_node)
 
-        # QdrantVectorStore 생성 (하이브리드 검색 지원)
-        self.vector_store = QdrantVectorStore(
-            client=self.client,
-            collection_name=self.config.collection_name,
-            enable_hybrid=True,  # 하이브리드 검색 활성화
-            batch_size=64,
-        )
+        logger.debug(f"created {len(text_nodes)} text nodes")
+        return text_nodes
 
-        # VectorStore에 직접 노드를 추가
-        self.vector_store.add(text_nodes)
+    def _should_include_node(
+        self,
+        node: NodeWithScore,
+        collapse_tree: bool,
+        start_layer: Optional[int],
+    ) -> bool:
+        """Check if node should be included based on layer filtering."""
+        if collapse_tree or start_layer is None:
+            return True
 
-        # 데이터가 저장된 vector_store로부터 Index를 로드
-        self.index = VectorStoreIndex.from_vector_store(self.vector_store)
+        node_layer = node.metadata.get('layer')
+        return node_layer == start_layer
 
-        logger.info("tree indexing complete")
-
-        # Full-Text Index 생성 (하이브리드 검색을 위해)
-        self._create_text_index()
-
-        # Retriever 초기화
-        self._initialize_retriever()
-
-    def _initialize_retriever(self):
-        """LlamaIndex Retriever 초기화"""
-        # LlamaIndex Settings에 임베딩 모델 설정
-        self._setup_llama_embedding()
-
-        if self.index is None:
-            # 기존 컬렉션이 있으면 로드
-            self.vector_store = QdrantVectorStore(
-                client=self.client,
+    def _create_text_index(self) -> None:
+        """하이브리드 검색의 키워드 검색을 위해 'text' 필드에 대한 full-text 인덱스 생성"""
+        try:
+            self.client.create_payload_index(
                 collection_name=self.config.collection_name,
-                enable_hybrid=True,  # 하이브리드 검색 활성화
-                batch_size=64,
+                # 어떤 필드에 대해 텍스트 인덱스를 생성할지 지정
+                field_name="text",
+                # 어떤 규칙으로 색인을 생성할지 지정
+                field_schema=models.TextIndexParams(
+                    type="text",
+                    # 다국어를 지원하는 토크나이저
+                    tokenizer=models.TokenizerType.MULTILINGUAL,
+                    # 검색 시 대소문자 구분하지 않도록 모두 소문자로 변환
+                    lowercase=True,
+                ),
             )
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.debug("full-text index already exists for 'text' field")
+            else:
+                logger.warning(f"failed to create text index: {e}")
+
+    def build_from_tree(
+        self,
+        tree: Tree,
+        document_name: Optional[str] = None,
+        append_mode: bool = False,
+    ) -> None:
+        """RAPTOR Tree 객체로부터 Qdrant 컬렉션을 빌드"""
+        all_nodes = list(tree.all_nodes.values())
+        logger.info(f"building index from tree with {len(all_nodes)} nodes")
+
+        try:
+            if not append_mode:
+                self.manager.recreate_collection(
+                    self.config.collection_name, self.config.vector_size
+                )
+
+            self._setup_llama_embedding()
+
+            text_nodes = self._create_text_nodes(all_nodes, tree, document_name)
+            self.vector_store = QdrantVectorStore(
+                client=self.client, **self.config.vector_store_config
+            )
+            self.vector_store.add(text_nodes)
             self.index = VectorStoreIndex.from_vector_store(self.vector_store)
 
-        # 기본적으로 하이브리드 검색 사용
-        self.retriever = self.index.as_retriever(
-            similarity_top_k=self.config.top_k,
-            vector_store_query_mode=VectorStoreQueryMode.HYBRID,
-            alpha=self.config.hybrid_alpha,
-        )
+            self._create_text_index()
+            self._initialize_retriever()
+
+            logger.info("tree indexing completed successfully")
+        except Exception as e:
+            logger.error(f"failed to build index from tree: {e}")
+            raise
 
     def retrieve(
         self,
         query: str,
-        top_k: Optional[int] = None,
-        max_tokens: Optional[int] = None,
         collapse_tree: bool = True,
         start_layer: Optional[int] = None,
-    ) -> Tuple[str, List[dict]]:
-        """
-        쿼리를 기반으로 Qdrant에서 관련 컨텍스트를 검색합니다.
-        """
-        # 파라미터가 제공되지 않으면 config의 기본값을 사용합니다.
-        top_k = top_k if top_k is not None else self.config.top_k
-        max_tokens = (
-            max_tokens
-            if max_tokens is not None
-            else self.config.max_context_tokens
-        )
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        try:
+            if self.retriever is None:
+                self._initialize_retriever()
 
-        # Retriever가 초기화되지 않은 경우 초기화
-        if self.retriever is None:
-            self._initialize_retriever()
-
-        # top_k가 기본값과 다르면 새로운 retriever 생성
-        if top_k != self.config.top_k:
-            retriever = self.index.as_retriever(
-                similarity_top_k=top_k,
-                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
-                alpha=self.config.hybrid_alpha,
-            )
-        else:
             retriever = self.retriever
+            retrieved_nodes = retriever.retrieve(query)
 
-        # LlamaIndex retriever로 검색
-        retrieved_nodes = retriever.retrieve(query)
+            context = ""
+            total_tokens = 0
+            tree_layer = []
 
-        # 결과 처리
-        context = ""
-        total_tokens = 0
-        layer_information = []
-
-        for node in retrieved_nodes:
-            # 레이어 필터링 적용
-            if not collapse_tree and start_layer is not None:
-                node_layer = node.metadata.get('layer')
-                if node_layer != start_layer:
+            for node in retrieved_nodes:
+                if not self._should_include_node(
+                    node, collapse_tree, start_layer
+                ):
                     continue
 
-            chunk = node.text
-            tokens = len(self.tokenizer.encode(chunk))
-            if total_tokens + tokens <= max_tokens:
-                context += chunk + "\n\n"
-                total_tokens += tokens
-                layer_information.append(
-                    {
-                        "node_index": node.metadata.get('node_index'),
-                        "layer_number": node.metadata.get('layer'),
-                        "score": node.score if hasattr(node, 'score') else 0.0,
-                    }
-                )
-            else:
-                break
+                chunk = node.text
+                tokens = node.metadata.get('token_count')
 
-        logger.info(
-            f"Hybrid search retrieved context with {total_tokens} tokens from {len(layer_information)} chunks."
-        )
-        return context.strip(), layer_information
+                if total_tokens + tokens <= self.config.max_tokens:
+                    context += chunk + "\n\n"
+                    total_tokens += tokens
+                    tree_layer.append(
+                        {
+                            "node_index": node.metadata.get('node_index'),
+                            "layer_number": node.metadata.get('layer'),
+                            "chunked_by": node.metadata.get('chunked_by'),
+                            "token_count": tokens,
+                            "score": getattr(node, 'score', 0.0),
+                        }
+                    )
+                else:
+                    break
+            logger.info(f"retrieved context with {total_tokens} tokens")
+            return context.strip(), tree_layer
 
-    def get_points_by_document_name(self, document_name: str) -> List[dict]:
-        """
-        특정 document_name을 가진 모든 포인트를 반환합니다.
-        """
-        search_filter = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="document_name",
-                    match=models.MatchValue(value=document_name),
-                )
-            ]
-        )
-
-        scroll_result = self.client.scroll(
-            collection_name=self.config.collection_name,
-            scroll_filter=search_filter,
-            with_payload=True,
-            with_vectors=False,
-            limit=10000,  # 충분히 큰 수로 설정
-        )
-
-        return [
-            {
-                "id": point.id,
-                "payload": point.payload,
-            }
-            for point in scroll_result[0]
-        ]
-
-    def delete_points_by_document_name(self, document_name: str) -> int:
-        """
-        특정 document_name을 가진 모든 포인트를 삭제합니다.
-        삭제된 포인트 수를 반환합니다.
-        """
-        points = self.get_points_by_document_name(document_name)
-        if not points:
-            logger.info(f"No points found for document_name: {document_name}")
-            return 0
-
-        point_ids = [point["id"] for point in points]
-
-        self.client.delete(
-            collection_name=self.config.collection_name,
-            points_selector=models.PointIdsList(points=point_ids),
-            wait=True,
-        )
-
-        logger.info(
-            f"Deleted {len(point_ids)} points for document_name: {document_name}"
-        )
-        return len(point_ids)
-
-    def _create_text_index(self):
-        """하이브리드 검색을 위한 Full-Text Index 생성"""
-        try:
-            self.client.create_payload_index(
-                collection_name=self.config.collection_name,
-                field_name="text",
-                field_schema=models.TextIndexParams(
-                    type="text",
-                    tokenizer=models.TokenizerType.MULTILINGUAL,
-                    lowercase=True,
-                ),
-            )
-            logger.info("Full-text index created for 'text' field")
         except Exception as e:
-            # 이미 인덱스가 존재하는 경우 무시
-            if "already exists" in str(e).lower():
-                logger.info("Full-text index already exists for 'text' field")
-            else:
-                logger.warning(f"Failed to create text index: {e}")
+            logger.error(f"failed to retrieve context: {e}")
+            raise

@@ -5,10 +5,14 @@ from src.rag.main import EngineConfig, RaptorEngine
 from src.database.qdrant_manager import QdrantManager
 from src.core.logger import configure_logging
 
+
 logger = logging.getLogger(__name__)
 
 
 def main():
+    # LlamaIndex 설정
+    os.environ["LLAMA_INDEX_CACHE_DIR"] = "/tmp/llama_index_cache"
+
     # 1. 로깅 시스템 설정
     configure_logging()
 
@@ -26,9 +30,6 @@ def main():
     # 3. RAG 파이프라인 설정
     config = EngineConfig(
         collection_name="sample",  # 컬렉션 이름을 문서 내용에 맞게 변경
-        top_k=10,  # 검색할 청크 개수 (증가)
-        max_tokens_per_chunk=512,  # 텍스트를 나눌 청크의 최대 토큰 크기 (증가)
-        max_context_tokens=4000,  # 컨텍스트 토큰 수 (증가)
     )
 
     # 4. RAG 파이프라인 객체 생성
@@ -81,7 +82,7 @@ def main():
         print(f"\n🔍 Retrieved Context (from {len(layer_info)} chunks):")
         for i, info in enumerate(layer_info[:3]):  # 상위 3개만 출력
             print(
-                f"  Chunk {i+1}: Layer {info['layer_number']}, Score: {info['score']:.3f}"
+                f" Chunk {i+1}: Layer {info['layer_number']}, Score: {info['score']:.3f}, Chunked by: {info['chunked_by']}, Token: {info['token_count']}"
             )
         print("\n" + "=" * 50)
         print(f"❓ Question: {question}")

@@ -16,6 +16,9 @@ class Node:
     index: int  # 모든 노드를 구분하기 위한 고유 인덱스
     children: Set[int]  # 자식 노드들의 인덱스를 저장
     embeddings: Any  # 텍스트를 벡터로 변환한 임베딩 값
+    metadata: Optional[Dict[str, Any]] = field(
+        default_factory=dict, compare=False
+    )  # ChunkMetadata 구조를 따르는 메타데이터
 
 
 @dataclass

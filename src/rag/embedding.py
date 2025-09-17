@@ -30,11 +30,15 @@ class BaseEmbeddingModel(ABC):
 # https://huggingface.co/nlpai-lab/KoE5
 class KoreanEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, model_name: str = settings.EMBEDDING_MODEL):
+        """KoreanEmbeddingModel 초기화
+
+        Args:
+            model_name (str, optional): 사용할 모델의 이름
+        """
         try:
-            logger.info(f"loading embedding model: {model_name}")
             self.model = SentenceTransformer(model_name)
             self.model_name = model_name
-            logger.info(f"embedding model loaded successfully")
+            logger.info(f"{model_name} loaded successfully")
         except Exception as e:
             logger.error(f"failed to load embedding model {model_name}: {e}")
             raise ValueError(f"failed to initialize embedding model: {e}")

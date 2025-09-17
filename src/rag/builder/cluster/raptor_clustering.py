@@ -1,9 +1,8 @@
 import logging
 import numpy as np
 import umap
-import tiktoken
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict
+from typing import List
 
 from src.rag.builder.models.structure import Node
 from .utils import (
@@ -40,7 +39,6 @@ class RaptorClustering(ClusteringAlgorithm):
         self.max_length_in_cluster = max_length_in_cluster
         self.reduction_dimension = reduction_dimension
         self.threshold = threshold
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
     def _hierarchical_cluster(self, embeddings: np.ndarray) -> List[np.ndarray]:
         """각 임베딩이 어떤 클러스터에 속하는지를 나타내는 인덱스 배열의 리스트를 반환"""
@@ -127,12 +125,15 @@ class RaptorClustering(ClusteringAlgorithm):
         logger.info(f"total local clusters found: {total_clusters}")
         return all_local_clusters
 
+    def _get_node_token_count(self, node: Node) -> int:
+        """노드의 토큰 수를 메타데이터에서 가져옴"""
+        return node.metadata.get('token_count')
+
     def perform_clustering(
         self,
         nodes: List[Node],
         embedding_model_name: str,
         recursion_depth: int = 0,
-        _token_cache: Optional[Dict[int, int]] = None,
     ) -> List[List[Node]]:
         """Node 객체 리스트를 받아 그룹화된 Node 객체들의 리스트를 반환
         클러스터링의 전체 과정을 지휘하고 숫자 데이터를 다루는 _hierarchical_cluster 메서드
@@ -166,15 +167,6 @@ class RaptorClustering(ClusteringAlgorithm):
         # 계층적 클러스터링 수행, 각 노드가 어떤 클러스터 ID에 속하는지 나타내는 인덱스 배열의 리스트를 반환
         clusters_indices = self._hierarchical_cluster(embeddings)
 
-        # 최상위 호출일 때만 캐시를 생성
-        if _token_cache is None:
-            _token_cache = {}
-            for node in nodes:
-                if node.index not in _token_cache:
-                    _token_cache[node.index] = len(
-                        self.tokenizer.encode(node.text)
-                    )
-
         # 클러스터 ID를 key로, Node 리스트를 value로 갖는 딕셔너리를 생성
         clusters_map = {}
         for i, label_array in enumerate(clusters_indices):
@@ -194,9 +186,9 @@ class RaptorClustering(ClusteringAlgorithm):
                 node_clusters.append(cluster_nodes)
                 continue
 
-            # 현재 클러스터에 속한 모든 노드들의 텍스트 길이를 토큰 단위로 합산 (캐시 사용)
+            # 현재 클러스터에 속한 모든 노드들의 텍스트 길이를 토큰 단위로 합산
             total_length = sum(
-                [_token_cache[node.index] for node in cluster_nodes]
+                [self._get_node_token_count(node) for node in cluster_nodes]
             )
 
             # 클러스터가 너무 길고, 노드 수가 3개 이상이고, 재귀 깊이가 한계 내일 때만 재분할
@@ -209,12 +201,10 @@ class RaptorClustering(ClusteringAlgorithm):
                     f"reclustering cluster with {len(cluster_nodes)} nodes (depth: {recursion_depth})"
                 )
                 # 재귀 호출의 결과는 하나 이상의 작은 클러스터이므로 extend 사용
-                # 재귀 호출 시 캐시를 그대로 전달
                 sub_clusters = self.perform_clustering(
                     cluster_nodes,
                     embedding_model_name,
                     recursion_depth + 1,
-                    _token_cache,
                 )
 
                 # 재귀 호출 결과가 원본과 동일하면 무한루프 방지를 위해 강제 종료

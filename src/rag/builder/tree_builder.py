@@ -1,13 +1,15 @@
 import copy
 import logging
+import os
 from abc import abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from typing import Dict, List, Optional, Set, Tuple
 
 from tqdm import tqdm
 from llama_index.core.schema import TextNode
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
-from src.rag.chunking import BaseChunker, HybridChunker
+from src.rag.chunker.hybrid_chunker import BaseChunker, HybridChunker
 from src.core.config import settings
 from src.rag.summarizer import (
     BaseSummarizationModel,
@@ -119,33 +121,85 @@ class TreeBuilder:
             embedding = llama_node.embedding
 
         embeddings_dict = {main_model_name: embedding}
-        # (인덱스, 생성된 Node 객체) 튜플 반환
-        return (index, Node(text, index, children_indices, embeddings_dict))
 
-    def summarize(self, context, max_tokens=150) -> str:
+        # LlamaIndex TextNode의 메타데이터를 복사
+        metadata = dict(llama_node.metadata) if llama_node.metadata else {}
+
+        # (인덱스, 생성된 Node 객체) 튜플 반환
+        return (
+            index,
+            Node(
+                text=text,
+                index=index,
+                children=children_indices,
+                embeddings=embeddings_dict,
+                metadata=metadata,
+            ),
+        )
+
+    def summarize(self, text) -> str:
         """주어진 컨텍스트(텍스트)를 요약"""
-        return self.summarization_model.summarize(context, max_tokens)
+        return self.summarization_model.summarize(text)
 
     def multithreaded_create_leaf_nodes(
         self, nodes: List[TextNode]
     ) -> Dict[int, Node]:
-        """ThreadPoolExecutor를 사용하여 멀티스레딩으로 Leaf Node 생성"""
+        """ThreadPoolExecutor를 사용하여 안전한 멀티스레딩으로 Leaf Node 생성"""
         leaf_nodes = {}
-        with ThreadPoolExecutor() as executor:
-            # 각 노드에 대해 create_node 작업을 스레드 풀에 제출
-            future_to_index = {
-                executor.submit(self.create_node, i, node): i
-                for i, node in enumerate(nodes)
-            }
-            # 완료된 작업들을 tqdm로 감싸서 진행 상황 표시
-            for future in tqdm(
-                as_completed(future_to_index),
-                total=len(nodes),
-                desc="Creating Leaf Nodes",
+
+        if not nodes:
+            logger.warning("No nodes provided for leaf node creation")
+            return leaf_nodes
+
+        # 적절한 스레드 수 계산 (CPU 코어 수의 2배, 최대 16개로 제한)
+        max_workers = min(len(nodes), max(1, os.cpu_count() * 2), 16)
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 모든 작업을 한 번에 제출
+                futures = [
+                    executor.submit(self.create_node, i, node)
+                    for i, node in enumerate(nodes)
+                ]
+
+                # 완료된 작업들을 안전하게 처리
+                completed_count = 0
+                with tqdm(
+                    total=len(futures), desc="Creating Leaf Nodes"
+                ) as pbar:
+                    for future in concurrent.futures.as_completed(
+                        futures, timeout=300
+                    ):
+                        try:
+                            index, node = future.result(timeout=60)
+                            leaf_nodes[index] = node
+                            completed_count += 1
+                        except concurrent.futures.TimeoutError:
+                            logger.error("task timed out")
+                        except Exception as e:
+                            logger.error(f"task failed: {e}")
+                        finally:
+                            pbar.update(1)
+
+                logger.info(
+                    f"successfully created {completed_count}/{len(nodes)} leaf nodes"
+                )
+
+        except Exception as e:
+            logger.error(f"Critical error in multithreaded node creation: {e}")
+            # 폴백: 싱글스레드로 처리
+            logger.info("Falling back to single-threaded node creation")
+            for i, node in enumerate(
+                tqdm(nodes, desc="Creating Leaf Nodes (Fallback)")
             ):
-                # 완료된 작업의 결과를 가져와서 leaf_nodes에 추가
-                index, node = future.result()
-                leaf_nodes[index] = node
+                try:
+                    index, created_node = self.create_node(i, node)
+                    leaf_nodes[index] = created_node
+                except Exception as node_error:
+                    logger.error(
+                        f"Failed to create node {i} in fallback mode: {node_error}"
+                    )
+
         return leaf_nodes
 
     def build_from_text(

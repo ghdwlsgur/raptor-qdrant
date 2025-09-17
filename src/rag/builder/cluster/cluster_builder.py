@@ -1,16 +1,20 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from threading import Lock
 from typing import Dict, List
 
 import tiktoken
-from .raptor_clustering import RaptorClustering
+from llama_index.core.schema import TextNode
+from src.rag.constants import DEFAULT_ENCODING
+from src.rag.chunker.models.chunk_metadata import ChunkMetadata, ChunkingMethod
 from src.rag.builder.models.structure import Node, Tree
 from src.rag.builder.tree_builder import TreeBuilder, TreeBuilderConfig
 from src.rag.builder.utils import (
     get_node_list,
     get_text,
 )
+from .raptor_clustering import RaptorClustering
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,7 @@ class ClusterTreeBuilder(TreeBuilder):
         self.reduction_dimension = config.reduction_dimension
         self.clustering_algorithm = config.clustering_algorithm
         self.clustering_params = config.clustering_params
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.tokenizer = tiktoken.get_encoding(DEFAULT_ENCODING)
 
     def construct_tree(
         self,
@@ -75,25 +79,38 @@ class ClusterTreeBuilder(TreeBuilder):
             cluster: List[Node],
             new_level_nodes: Dict[int, Node],
             node_index: int,
-            summarization_length: int,
             lock: Lock,
         ):
             """하나의 클러스터를 처리하여 요약 노드를 생성하고 새로운 부모 노드를 생성"""
             # 클러스터 내 모든 노드의 텍스트를 하나로 합침
             node_texts = get_text(cluster)
+
             # 합쳐진 텍스트를 요약하여 부모 노드의 텍스트로 사용
-            summarized_text = self.summarize(
-                context=node_texts,
-                max_tokens=summarization_length,
-            )
+            summarized_text = self.summarize(text=node_texts)
+
+            # 요약이 불충분하면 해당 클러스터를 건너뜀
+            if summarized_text.strip() == "NO_SUMMARY":
+                logging.info(
+                    f"skipping cluster {node_index}: summarization returned NO_SUMMARY"
+                )
+                return
+
             logging.info(
-                f"summarized text for node {node_index}: {summarized_text[:100]}..."
+                f"summarized text for node {node_index}: {summarized_text}"
+            )
+
+            token_count = len(self.tokenizer.encode(summarized_text))
+            chunk_metadata = ChunkMetadata(
+                chunked_by=ChunkingMethod.SUMMARY, token_count=token_count
+            )
+            summary_node = TextNode(
+                text=summarized_text, metadata=chunk_metadata.to_dict()
             )
 
             # 요약된 텍스트와 자식 노드 인덱스를 사용해 새로운 부모 노드 생성
             _, new_parent_node = self.create_node(
                 node_index,
-                summarized_text,
+                summary_node,
                 {node.index for node in cluster},
             )
 
@@ -126,23 +143,71 @@ class ClusterTreeBuilder(TreeBuilder):
             )
 
             lock = Lock()
-            summarization_length = self.summarization_length
-
             if use_multithreading:
                 # AWS Bedrock API 제한을 고려하여 동시 요청 수를 제한
                 max_workers = min(10, len(clusters))  # 최대 10개 동시 요청
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for cluster in clusters:
-                        executor.submit(
-                            process_cluster,
-                            cluster,
-                            new_level_nodes,
-                            next_node_index,
-                            summarization_length,
-                            lock,
+
+                try:
+                    with ThreadPoolExecutor(
+                        max_workers=max_workers
+                    ) as executor:
+                        # 모든 작업을 한 번에 제출
+                        futures = []
+                        cluster_args = []
+
+                        for cluster in clusters:
+                            args = (
+                                cluster,
+                                new_level_nodes,
+                                next_node_index,
+                                lock,
+                            )
+                            cluster_args.append(args)
+                            futures.append(
+                                executor.submit(process_cluster, *args)
+                            )
+                            next_node_index += 1
+
+                        # 모든 작업 완료까지 안전하게 대기
+                        completed_count = 0
+                        for future in concurrent.futures.as_completed(
+                            futures, timeout=600
+                        ):
+                            try:
+                                future.result(
+                                    timeout=300
+                                )  # 개별 작업 5분 타임아웃
+                                completed_count += 1
+                            except concurrent.futures.TimeoutError:
+                                logger.error("cluster processing timed out")
+                            except Exception as e:
+                                logger.error(f"cluster processing failed: {e}")
+
+                        logger.info(
+                            f"successfully processed {completed_count}/{len(futures)} clusters"
                         )
-                        next_node_index += 1
-                    executor.shutdown(wait=True)
+
+                except Exception as e:
+                    logger.error(
+                        f"critical error in multithreaded cluster processing: {e}"
+                    )
+                    logger.info(
+                        "falling back to single-threaded cluster processing"
+                    )
+                    next_node_index = len(all_tree_nodes)
+                    for cluster in clusters:
+                        try:
+                            process_cluster(
+                                cluster,
+                                new_level_nodes,
+                                next_node_index,
+                                lock,
+                            )
+                            next_node_index += 1
+                        except Exception as cluster_error:
+                            logger.error(
+                                f"failed to process cluster in fallback mode: {cluster_error}"
+                            )
 
             else:
                 for cluster in clusters:
@@ -150,7 +215,6 @@ class ClusterTreeBuilder(TreeBuilder):
                         cluster,
                         new_level_nodes,
                         next_node_index,
-                        summarization_length,
                         lock,
                     )
                     next_node_index += 1

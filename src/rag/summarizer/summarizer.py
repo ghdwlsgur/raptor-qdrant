@@ -2,6 +2,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from src.rag.llm.bedrock import AmazonBedrock
+from src.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +11,7 @@ class BaseSummarizationModel(ABC):
     """모든 요약 모델이 상속받아야 할 기본 클래스"""
 
     @abstractmethod
-    def summarize(self, context: str, max_tokens: int) -> str:
+    def summarize(self, text: str) -> str:
         pass
 
 
@@ -22,24 +23,18 @@ class BedrockSummarizer(BaseSummarizationModel):
         except Exception as e:
             raise ValueError(f"failed to initialize Bedrock client: {e}")
 
-    def summarize(self, context: str, max_tokens: int = 500) -> str:
-        if not context.strip():
+    def summarize(self, text: str) -> str:
+        if not text.strip():
             logger.warning(
                 "summarize called with empty context. returning empty string."
             )
             return ""
 
         try:
-            prompt = (
-                f"Please provide a concise summary of the following text. "
-                f"Focus on the key facts, entities, and relationships.\n\n"
-                f"Text to summarize:\n---\n{context}\n---\n\n"
-                f"Concise Summary:"
-            )
+            prompt_template = load_prompt("prompt/summarizer.md")
+            prompt = prompt_template.format(text=text)
 
-            summary = self.bedrock_client.answer(
-                context="", question=prompt
-            )
+            summary = self.bedrock_client.answer(context="", question=prompt)
             return summary.strip() if summary else ""
 
         except Exception as e:
