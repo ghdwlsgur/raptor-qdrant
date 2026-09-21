@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 import tiktoken
 
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -92,18 +92,15 @@ class HybridChunker(BaseChunker):
         # 긴 섹션에 대해 SemanticSplitter를 조건부로 적용하기 위한 리스트
         nodes = []
         for structural_node in structural_nodes:
-            token_count = self._count_tokens(structural_node.text)
+            section_token_count = self._count_tokens(structural_node.text)
             existing_metadata = structural_node.metadata or {}
 
-            is_semantic_split_needed = token_count > self.max_tokens
+            is_semantic_split_needed = section_token_count > self.max_tokens
             method = (
                 ChunkingMethod.HYBRID
                 if is_semantic_split_needed
                 else ChunkingMethod.MARKDOWN
             )
-            metadata = ChunkMetadata(
-                chunked_by=method, token_count=token_count
-            ).to_dict()
 
             # 토큰 수가 임계값을 초과하면 SemanticSplitter로 추가 분할
             if is_semantic_split_needed:
@@ -111,12 +108,35 @@ class HybridChunker(BaseChunker):
                 semantic_nodes = self.semantic_parser.get_nodes_from_documents(
                     sub_documents
                 )
-                for semantic_node in semantic_nodes:
-                    semantic_node.metadata = existing_metadata.copy()
-                    semantic_node.metadata.update(metadata)
-                nodes.extend(semantic_nodes)
+                nodes.extend(
+                    self._tag(node, existing_metadata, method)
+                    for node in semantic_nodes
+                )
             else:
-                structural_node.metadata = existing_metadata.copy()
-                structural_node.metadata.update(metadata)
-                nodes.append(structural_node)
+                nodes.append(
+                    self._tag(
+                        structural_node,
+                        existing_metadata,
+                        method,
+                        token_count=section_token_count,
+                    )
+                )
         return nodes
+
+    def _tag(
+        self,
+        node: TextNode,
+        existing_metadata: dict,
+        method: ChunkingMethod,
+        token_count: Optional[int] = None,
+    ) -> TextNode:
+        if token_count is None:
+            token_count = self._count_tokens(node.get_content())
+
+        node.metadata = existing_metadata.copy()
+        node.metadata.update(
+            ChunkMetadata(
+                chunked_by=method, token_count=token_count
+            ).to_dict()
+        )
+        return node

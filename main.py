@@ -1,113 +1,158 @@
+import argparse
 import logging
 import os
+from pathlib import Path
+from typing import Optional
 
-from src.rag.main import EngineConfig, RaptorEngine
-from src.database.qdrant_manager import QdrantManager
+from src.core.config import settings
 from src.core.logger import configure_logging
+from src.database.qdrant_manager import QdrantManager
+from src.rag.llm import create_chatbot
+from src.rag.engine import EngineConfig, QueryResult, RaptorEngine
 
 
 logger = logging.getLogger(__name__)
 
+LLAMA_INDEX_CACHE_DIR = "/tmp/llama_index_cache"
+DEFAULT_DOCUMENT = "data/sample_ko.txt"
+DEFAULT_COLLECTION = "sample"
 
-def main():
-    # LlamaIndex 설정
-    os.environ["LLAMA_INDEX_CACHE_DIR"] = "/tmp/llama_index_cache"
+DEFAULT_QUESTIONS = [
+    "신데렐라는 누구인가요?",
+    "신데렐라의 의붓언니들은 축제 전에 신데렐라에게 무엇을 하라고 시켰나요?",
+    "왕자는 신데렐라를 찾기 위해 무엇을 사용했나요?",
+    "마지막에 의붓언니들은 어떻게 벌을 받았나요?",
+]
 
-    # 1. 로깅 시스템 설정
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="RAPTOR 트리를 만들어 Qdrant 에 적재하고 질의하는 데모"
+    )
+    parser.add_argument(
+        "--file",
+        default=DEFAULT_DOCUMENT,
+        help=f"인덱싱할 문서 경로 (기본: {DEFAULT_DOCUMENT})",
+    )
+    parser.add_argument(
+        "--collection",
+        default=DEFAULT_COLLECTION,
+        help=f"Qdrant 컬렉션 이름 (기본: {DEFAULT_COLLECTION})",
+    )
+    parser.add_argument(
+        "--document-name",
+        default=None,
+        help="문서 구분 이름 (기본: 파일 이름)",
+    )
+    parser.add_argument(
+        "--question",
+        action="append",
+        dest="questions",
+        help="질문. 여러 번 지정할 수 있다 (기본: 내장 예시 질문)",
+    )
+    parser.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="인덱싱을 건너뛰고 이미 적재된 컬렉션에 질의만 한다",
+    )
+    parser.add_argument(
+        "--llm",
+        choices=["ollama", "bedrock"],
+        default=None,
+        help=f"요약·답변에 쓸 LLM 공급자 (기본: {settings.LLM_PROVIDER})",
+    )
+    parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help="적재 전에 컬렉션을 통째로 지운다 (같은 컬렉션의 다른 문서도 함께 사라진다)",
+    )
+    return parser.parse_args()
+
+
+def ready_chatbot(provider: Optional[str]):
+    llm = create_chatbot(provider)
+    if hasattr(llm, "health_check"):
+        llm.health_check()
+    logger.info(f"llm ready: {llm.describe}")
+    return llm
+
+
+def print_result(result: QueryResult, chunk_preview: int = 3) -> None:
+    print(f"\n🔍 Retrieved Context (from {len(result.chunks)} chunks):")
+    for i, info in enumerate(result.chunks[:chunk_preview], start=1):
+        print(
+            f" Chunk {i}: Layer {info['layer_number']}, "
+            f"Score: {info['score']:.3f}, "
+            f"Chunked by: {info['chunked_by']}, "
+            f"Token: {info['token_count']}"
+        )
+    print("\n" + "=" * 50)
+    print(f"❓ Question: {result.question}")
+    print(f"✅ Answer: {result.answer}")
+    print("=" * 50)
+
+
+def index_document(engine: RaptorEngine, args: argparse.Namespace) -> bool:
+    """문서를 읽어 인덱싱한다. 성공하면 True."""
+    path = Path(args.file)
+    if not path.exists():
+        logger.error(f"file not found: {path}")
+        return False
+
+    document_name = args.document_name or path.stem
+    text = path.read_text(encoding="utf-8")
+
+    if not args.recreate and document_name in engine.list_documents():
+        logger.info(
+            f"document '{document_name}' is already indexed, replacing it"
+        )
+        indexed = engine.update_document(text, document_name=document_name)
+    else:
+        logger.info(f"indexing '{path}' as '{document_name}'...")
+        indexed = engine.add_document(
+            text,
+            document_name=document_name,
+            recreate_collection=args.recreate,
+        )
+
+    logger.info(f"document indexing finished: {indexed} nodes")
+    return True
+
+
+def main() -> int:
+    args = parse_args()
+
+    os.environ["LLAMA_INDEX_CACHE_DIR"] = LLAMA_INDEX_CACHE_DIR
     configure_logging()
 
-    # 2. Qdrant 데이터베이스 연결 (싱글톤 패턴)
     try:
-        qdrant_manager = QdrantManager()
-        qdrant_manager.connect()  # settings.py 또는 환경변수에 설정된 값으로 연결
+        QdrantManager().connect()
         logger.info("qdrant connection successful")
     except Exception as e:
         logger.error(
             f"Failed to connect to Qdrant. Please ensure Qdrant is running. Error: {e}"
         )
-        return
+        return 1
 
-    # 3. RAG 파이프라인 설정
-    config = EngineConfig(
-        collection_name="sample",  # 컬렉션 이름을 문서 내용에 맞게 변경
+    try:
+        llm = ready_chatbot(args.llm)
+    except Exception as e:
+        logger.error(f"LLM is not usable: {e}")
+        return 1
+
+    engine = RaptorEngine(
+        EngineConfig(collection_name=args.collection, llm=llm)
     )
-
-    # 4. RAG 파이프라인 객체 생성
-    engine = RaptorEngine(config)
     logger.info("rag pipeline initialized")
 
-    # 5. 파일에서 문서 읽어오기
-    file_path = "data/sample.md"
-    if not os.path.exists(file_path):
-        logger.error(
-            f"File not found: {file_path}. Please create this file with the Cinderella story."
-        )
-        return
+    if not args.skip_index and not index_document(engine, args):
+        return 1
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        document_text = f.read()
+    for question in args.questions or DEFAULT_QUESTIONS:
+        print_result(engine.query(question))
 
-    # 6. 문서 인덱싱 실행
-    # 이 과정에서 RAPTOR 트리가 생성되고, 모든 노드가 Qdrant에 저장됩니다.
-    logger.info("starting to add and index the document...")
-    engine.add_document(document_text, document_name="Sample Test")
-    logger.info("document indexing finished")
-
-    # 7. 문서 내용에 대한 질문 및 답변 생성
-    # questions = [
-    #     "Who is Cinderella?",
-    #     "What did Cinderella's step-sisters ask her to do before the festival?",
-    #     "What did the prince use to find Cinderella?",
-    #     "How were the step-sisters punished in the end?",
-    # ]
-    # questions = [
-    #     "신데렐라는 누구인가요?",
-    #     "신데렐라의 의붓언니들은 축제 전에 신데렐라에게 무엇을 하라고 시켰나요?",
-    #     "왕자는 신데렐라를 찾기 위해 무엇을 사용했나요?",
-    #     "마지막에 의붓언니들은 어떻게 벌을 받았나요?",
-    # ]
-    questions = [
-        "텍스트 마이닝의 4단계 과정을 순서대로 알려주세요",
-        "비정형(Unstructured) 데이터가 정형(Structured) 데이터로 변환되는 예시 표에서, 이름이 'Linh'인 사람의 나이는 몇 살인가요?",
-        "천연 화장품'의 연관어 분석 표에서, '효능/효과'의 세부 키워드 중 가장 수치가 높은 것은 무엇이며 그 값은 얼마인가요?",
-        "텍스트 분석의 '과업(Task)'으로 언급되지 않은 것을 고르세요: 1) 문서 요약, 2) 감성 분석, 3) 이미지 인식, 4) 기계 번역",
-        "텍스트 데이터 수집에서 '인간'은 어떤 역할을 담당하며, 이는 온도계나 위치 센서와 같은 일반적인 센서와 어떻게 다른가요?",
-    ]
-
-    for question in questions:
-        # answer 메서드가 내부적으로 retrieve를 호출하므로 중복 제거
-        answer = engine.answer(question)
-        # 디버그용으로 검색 정보를 별도로 가져옴 (실제로는 중복이지만 정보 표시용)
-        _, layer_info = engine.retrieve(question)
-        print(f"\n🔍 Retrieved Context (from {len(layer_info)} chunks):")
-        for i, info in enumerate(layer_info[:3]):  # 상위 3개만 출력
-            print(
-                f" Chunk {i+1}: Layer {info['layer_number']}, Score: {info['score']:.3f}, Chunked by: {info['chunked_by']}, Token: {info['token_count']}"
-            )
-        print("\n" + "=" * 50)
-        print(f"❓ Question: {question}")
-        print(f"✅ Answer: {answer}")
-        print("=" * 50)
-
-    # points = engine.get_document_points("Cinderella Story")
-    # print(
-    #     f"Retrieved {len(points)} points for document_name: 'Cinderella Story'"
-    # )
-
-    # for point in points:
-    #     print(f"  Point ID: {point['id']}, Payload: {point['payload']}")
-
-    # names = engine.list_documents()
-
-    # print("Documents in the collection:")
-    # for name in names:
-    #     print(f" - {name}")
-
-    # collections = engine.list_collections()
-    # print("Collections in the database:")
-    # for collection in collections:
-    #     print(f" - {collection}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

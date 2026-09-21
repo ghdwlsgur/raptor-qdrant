@@ -11,9 +11,13 @@ from llama_index.core.schema import TextNode
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from src.rag.chunker.hybrid_chunker import BaseChunker, HybridChunker
 from src.core.config import settings
+from src.rag.constants import (
+    SUMMARIZATION_MAX_WORKERS,
+    DEFAULT_SUMMARIZATION_MAX_WORKERS,
+)
 from src.rag.summarizer import (
     BaseSummarizationModel,
-    BedrockSummarizer,
+    LLMSummarizer,
 )
 from .models.structure import Node, Tree
 
@@ -37,10 +41,19 @@ class TreeBuilderConfig:
         chunker: Optional[
             BaseChunker
         ] = None,  # 텍스트 청킹에 사용할 청킹 오브젝트
+        summarization_max_workers: Optional[
+            int
+        ] = None,  # 클러스터 요약 동시 실행 수
     ):
         self.num_layers = num_layers
+        self.summarization_max_workers = (
+            summarization_max_workers
+            or SUMMARIZATION_MAX_WORKERS.get(
+                settings.LLM_PROVIDER, DEFAULT_SUMMARIZATION_MAX_WORKERS
+            )
+        )
         self.summarization_length = summarization_length
-        self.summarization_model = summarization_model or BedrockSummarizer()
+        self.summarization_model = summarization_model or LLMSummarizer()
         if not isinstance(self.summarization_model, BaseSummarizationModel):
             raise ValueError(
                 "summarization_model must be an instance of BaseSummarizationModel"
@@ -76,6 +89,7 @@ class TreeBuilderConfig:
             Embedding Models: {embedding_models}
             Cluster Embedding Model: {cluster_embedding_model}
             Chunker: {chunker}
+            Summarization Max Workers: {summarization_max_workers}
         """.format(
             num_layers=self.num_layers,
             summarization_length=self.summarization_length,
@@ -86,6 +100,7 @@ class TreeBuilderConfig:
             },
             cluster_embedding_model=self.cluster_embedding_model,
             chunker=self.chunker.__class__.__name__,
+            summarization_max_workers=self.summarization_max_workers,
         )
         return config_log
 
@@ -100,6 +115,7 @@ class TreeBuilder:
         self.embedding_models = config.embedding_models
         self.cluster_embedding_model = config.cluster_embedding_model
         self.chunker = config.chunker
+        self.summarization_max_workers = config.summarization_max_workers
 
     def create_node(
         self,
@@ -202,12 +218,28 @@ class TreeBuilder:
 
         return leaf_nodes
 
+    def _chunk_into_nodes(self, text: str) -> List[TextNode]:
+        nodes = self.chunker.chunk(text)
+
+        kept = [node for node in nodes if node.get_content().strip()]
+        dropped = len(nodes) - len(kept)
+        if dropped:
+            logger.info(f"dropped {dropped} empty chunk(s) before embedding")
+
+        if not kept:
+            raise ValueError("chunking produced no non-empty nodes")
+
+        return kept
+
     def build_from_text(
         self, text: str, use_multithreading: bool = True
     ) -> Tree:
         """전체 텍스트에서 최종 Tree 객체를 생성"""
+        if not text or not text.strip():
+            raise ValueError("cannot build a tree from empty text")
+
         # chunker를 사용하여 텍스트를 여러 개의 TextNode로 분할
-        nodes = self.chunker.chunk(text)
+        nodes = self._chunk_into_nodes(text)
 
         # 분할된 TextNode들로 트리의 리프 노드 구성
         if use_multithreading:

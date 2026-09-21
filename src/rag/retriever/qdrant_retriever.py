@@ -13,6 +13,7 @@ from .base_retriever import BaseRetriever
 from src.database.qdrant_manager import QdrantManager
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from src.rag.builder.models.structure import Tree
+from src.rag.utils import TOKEN_COUNT_KEY, resolve_token_count
 from src.rag.constants import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_TOP_K,
@@ -23,6 +24,8 @@ from src.rag.constants import (
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+TEXT_PAYLOAD_FIELD = "text"
 
 
 class QdrantRetrieverConfig:
@@ -43,7 +46,9 @@ class QdrantRetrieverConfig:
             collection_name (str, optional): Qdrant 컬렉션 이름
             hybrid_alpha (float, optional): 하이브리드 검색 가중치 (0: 키워드, 1: 벡터)
         """
-        self._validate_parameters(max_tokens, top_k, embedding_model)
+        self._validate_parameters(
+            max_tokens, top_k, hybrid_alpha, embedding_model
+        )
 
         self.top_k = top_k
         self.max_tokens = max_tokens
@@ -58,12 +63,15 @@ class QdrantRetrieverConfig:
         self,
         max_tokens: int,
         top_k: int,
+        hybrid_alpha: float,
         embedding_model: Optional[BaseEmbeddingModel],
     ) -> None:
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
+        if not 0.0 <= hybrid_alpha <= 1.0:
+            raise ValueError("hybrid_alpha must be between 0.0 and 1.0")
 
         if embedding_model is not None and not isinstance(
             embedding_model, BaseEmbeddingModel
@@ -82,37 +90,60 @@ class QdrantRetrieverConfig:
 
 
 class QdrantRetriever(BaseRetriever):
-    """Qdrant 벡터 데이터베이스를 사용하는 RAPTOR RAG 시스템의 Retriever 클래스"""
-
     def __init__(self, config: QdrantRetrieverConfig):
         self.config = config
         self.embedding_model = config.embedding_model
-        self._initialize_qdrant_components()
-        self._initialize_llama_index_components()
+        self.manager = QdrantManager()
+        self.client: QdrantClient = self.manager.get_client()
+        self._llama_embed_model: Optional[HuggingFaceEmbedding] = None
+        self._forget_collection_handles()
+
+    def _forget_collection_handles(self) -> None:
+        self.vector_store: Optional[QdrantVectorStore] = None
+        self.index: Optional[VectorStoreIndex] = None
+        self.retriever = None
 
     @property
     def collection_name(self) -> str:
         return self.config.collection_name
 
-    def _initialize_qdrant_components(self) -> None:
-        self.manager = QdrantManager()
-        self.client: QdrantClient = self.manager.get_client()
-        self.manager.create_collection_if_not_exists(
-            self.config.collection_name, self.config.vector_size
-        )
+    def _setup_llama_embedding(self) -> None:
+        if self._llama_embed_model is None:
+            try:
+                model_id = self.embedding_model.model_name
+                self._llama_embed_model = HuggingFaceEmbedding(
+                    model_name=model_id
+                )
+                logger.debug(f"embedding model loaded: {model_id}")
+            except Exception as e:
+                logger.error(
+                    f"failed to setup LlamaIndex embedding model: {e}"
+                )
+                raise
 
-    def _initialize_llama_index_components(self) -> None:
-        self.vector_store = None
-        self.index = None
-        self.retriever = None
+        Settings.embed_model = self._llama_embed_model
+
+    def _get_vector_store(self) -> QdrantVectorStore:
+        if self.vector_store is None:
+            self.vector_store = QdrantVectorStore(
+                client=self.client, **self.config.vector_store_config
+            )
+        return self.vector_store
 
     def _initialize_retriever(self) -> None:
-        """Initialize LlamaIndex Retriever."""
         try:
             self._setup_llama_embedding()
 
             if self.index is None:
-                self._load_existing_collection()
+                if not self.manager.collection_exists(self.collection_name):
+                    raise ValueError(
+                        f"collection '{self.collection_name}' does not exist. "
+                        "index a document first with add_document()"
+                    )
+                self.index = VectorStoreIndex.from_vector_store(
+                    self._get_vector_store()
+                )
+                logger.debug("loaded existing collection")
 
             self.retriever = self.index.as_retriever(
                 similarity_top_k=self.config.top_k,
@@ -124,49 +155,36 @@ class QdrantRetriever(BaseRetriever):
             logger.error(f"failed to initialize retriever: {e}")
             raise
 
-    def _load_existing_collection(self) -> None:
-        """Qdrant에 이미 존재하는 컬렉션을 로드"""
-        self.vector_store = QdrantVectorStore(
-            client=self.client, **self.config.vector_store_config
-        )
-        self.index = VectorStoreIndex.from_vector_store(self.vector_store)
-        logger.debug("loaded existing collection")
-
-    def _setup_llama_embedding(self) -> None:
-        """LlamaIndex의 임베딩 모델 등록"""
-        try:
-            model_id = self.embedding_model.model_name
-            llama_embed_model = HuggingFaceEmbedding(model_name=model_id)
-            Settings.embed_model = llama_embed_model
-            logger.debug(f"embedding model set to: {model_id}")
-        except Exception as e:
-            logger.error(f"failed to setup LlamaIndex embedding model: {e}")
-            raise
-
     def _create_text_nodes(
-        self, all_nodes: List[Any], tree: Tree, document_name: Optional[str]
+        self, tree: Tree, document_name: Optional[str]
     ) -> List[TextNode]:
         text_nodes = []
-        for node in all_nodes:
-            layer = tree.get_node_layer(node.index)
+        for node in tree.all_nodes.values():
             metadata = {
-                "layer": layer,
+                "layer": tree.get_node_layer(node.index),
                 "node_index": node.index,
             }
 
             if document_name:
                 metadata["document_name"] = document_name
 
-            if hasattr(node, 'metadata') and node.metadata:
+            if node.metadata:
                 metadata.update(node.metadata)
 
-            text_node = TextNode(
-                text=node.text,
-                id_=str(uuid.uuid4()),
-                embedding=node.embeddings[self.config.embedding_model_string],
-                metadata=metadata,
+            metadata[TOKEN_COUNT_KEY] = resolve_token_count(
+                metadata, node.text
             )
-            text_nodes.append(text_node)
+
+            text_nodes.append(
+                TextNode(
+                    text=node.text,
+                    id_=str(uuid.uuid4()),
+                    embedding=node.embeddings[
+                        self.config.embedding_model_string
+                    ],
+                    metadata=metadata,
+                )
+            )
 
         logger.debug(f"created {len(text_nodes)} text nodes")
         return text_nodes
@@ -177,26 +195,19 @@ class QdrantRetriever(BaseRetriever):
         collapse_tree: bool,
         start_layer: Optional[int],
     ) -> bool:
-        """Check if node should be included based on layer filtering."""
         if collapse_tree or start_layer is None:
             return True
 
-        node_layer = node.metadata.get('layer')
-        return node_layer == start_layer
+        return node.metadata.get('layer') == start_layer
 
-    def _create_text_index(self) -> None:
-        """하이브리드 검색의 키워드 검색을 위해 'text' 필드에 대한 full-text 인덱스 생성"""
+    def _create_keyword_search_index(self) -> None:
         try:
             self.client.create_payload_index(
-                collection_name=self.config.collection_name,
-                # 어떤 필드에 대해 텍스트 인덱스를 생성할지 지정
-                field_name="text",
-                # 어떤 규칙으로 색인을 생성할지 지정
+                collection_name=self.collection_name,
+                field_name=TEXT_PAYLOAD_FIELD,
                 field_schema=models.TextIndexParams(
                     type="text",
-                    # 다국어를 지원하는 토크나이저
                     tokenizer=models.TokenizerType.MULTILINGUAL,
-                    # 검색 시 대소문자 구분하지 않도록 모두 소문자로 변환
                     lowercase=True,
                 ),
             )
@@ -210,31 +221,34 @@ class QdrantRetriever(BaseRetriever):
         self,
         tree: Tree,
         document_name: Optional[str] = None,
-        append_mode: bool = False,
-    ) -> None:
-        """RAPTOR Tree 객체로부터 Qdrant 컬렉션을 빌드"""
-        all_nodes = list(tree.all_nodes.values())
-        logger.info(f"building index from tree with {len(all_nodes)} nodes")
+        recreate_collection: bool = False,
+    ) -> int:
+        """트리를 적재하고 적재한 노드 수를 반환한다."""
+        logger.info(
+            f"building index from tree with {len(tree.all_nodes)} nodes"
+        )
 
         try:
-            if not append_mode:
-                self.manager.recreate_collection(
-                    self.config.collection_name, self.config.vector_size
+            if recreate_collection:
+                logger.warning(
+                    f"dropping collection '{self.collection_name}' before indexing"
                 )
+                self.manager.drop_collection(self.collection_name)
+                self._forget_collection_handles()
 
             self._setup_llama_embedding()
 
-            text_nodes = self._create_text_nodes(all_nodes, tree, document_name)
-            self.vector_store = QdrantVectorStore(
-                client=self.client, **self.config.vector_store_config
+            text_nodes = self._create_text_nodes(tree, document_name)
+            self._get_vector_store().add(text_nodes)
+            self.index = VectorStoreIndex.from_vector_store(
+                self._get_vector_store()
             )
-            self.vector_store.add(text_nodes)
-            self.index = VectorStoreIndex.from_vector_store(self.vector_store)
 
-            self._create_text_index()
+            self._create_keyword_search_index()
             self._initialize_retriever()
 
             logger.info("tree indexing completed successfully")
+            return len(text_nodes)
         except Exception as e:
             logger.error(f"failed to build index from tree: {e}")
             raise
@@ -245,16 +259,19 @@ class QdrantRetriever(BaseRetriever):
         collapse_tree: bool = True,
         start_layer: Optional[int] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
+        if not query or not query.strip():
+            raise ValueError("query must be a non-empty string")
+
         try:
             if self.retriever is None:
                 self._initialize_retriever()
 
-            retriever = self.retriever
-            retrieved_nodes = retriever.retrieve(query)
+            retrieved_nodes = self.retriever.retrieve(query)
 
-            context = ""
+            chunks: List[str] = []
             total_tokens = 0
-            tree_layer = []
+            tree_layer: List[Dict[str, Any]] = []
+            skipped: List[Tuple[Any, int]] = []
 
             for node in retrieved_nodes:
                 if not self._should_include_node(
@@ -262,25 +279,42 @@ class QdrantRetriever(BaseRetriever):
                 ):
                     continue
 
-                chunk = node.text
-                tokens = node.metadata.get('token_count')
+                tokens = resolve_token_count(node.metadata, node.text)
 
-                if total_tokens + tokens <= self.config.max_tokens:
-                    context += chunk + "\n\n"
-                    total_tokens += tokens
-                    tree_layer.append(
-                        {
-                            "node_index": node.metadata.get('node_index'),
-                            "layer_number": node.metadata.get('layer'),
-                            "chunked_by": node.metadata.get('chunked_by'),
-                            "token_count": tokens,
-                            "score": getattr(node, 'score', 0.0),
-                        }
-                    )
-                else:
-                    break
-            logger.info(f"retrieved context with {total_tokens} tokens")
-            return context.strip(), tree_layer
+                if total_tokens + tokens > self.config.max_tokens:
+                    skipped.append((node.metadata.get('node_index'), tokens))
+                    continue
+
+                chunks.append(node.text)
+                total_tokens += tokens
+                tree_layer.append(
+                    {
+                        "node_index": node.metadata.get('node_index'),
+                        "layer_number": node.metadata.get('layer'),
+                        "chunked_by": node.metadata.get('chunked_by'),
+                        "token_count": tokens,
+                        "score": getattr(node, 'score', 0.0) or 0.0,
+                    }
+                )
+
+            if skipped:
+                logger.info(
+                    f"skipped {len(skipped)} node(s) that did not fit in the "
+                    f"remaining context budget "
+                    f"({total_tokens}/{self.config.max_tokens} tokens used): "
+                    f"{skipped}"
+                )
+            if retrieved_nodes and not chunks:
+                logger.warning(
+                    f"all {len(retrieved_nodes)} retrieved nodes were dropped. "
+                    f"every node is larger than max_tokens "
+                    f"({self.config.max_tokens}) — raise it or chunk smaller"
+                )
+
+            logger.info(
+                f"retrieved {len(tree_layer)} chunks with {total_tokens} tokens"
+            )
+            return "\n\n".join(chunks), tree_layer
 
         except Exception as e:
             logger.error(f"failed to retrieve context: {e}")

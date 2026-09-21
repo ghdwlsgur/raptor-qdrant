@@ -2,10 +2,10 @@ import json
 import logging
 import boto3
 
-from abc import ABC, abstractmethod
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from botocore.config import Config
 from src.core.config import settings
+from src.rag.llm.base import BaseChatbotModel
 from src.rag.constants import (
     BEDROCK_MAX_TOKENS,
     BEDROCK_ANTHROPIC_VERSION,
@@ -16,21 +16,6 @@ from src.rag.constants import (
 from src.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
-
-
-class BaseChatbotModel(ABC):
-    @abstractmethod
-    def answer(self, context: str, question: str) -> str:
-        """주어진 컨텍스트와 질문을 바탕으로 답변을 생성하는 추상 메서드
-
-        Args:
-            context (str): 질문에 답변하기 위해 참고할 컨텍스트
-            question (str): 사용자의 질문
-
-        Returns:
-            str: 모델이 생성한 답변
-        """
-        pass
 
 
 # https://aws.amazon.com/ko/blogs/tech/stream-chatbot-for-amazon-bedrock/
@@ -60,10 +45,10 @@ class AmazonBedrock(BaseChatbotModel):
             config = Config(
                 region_name=self.region,
                 retries={
-                    'max_attempts': BEDROCK_MAX_RETRIES,  # 최대 재시도 횟수
-                    'mode': 'adaptive',  # 재시도 간격 등을 동적으로 조절
+                    'max_attempts': BEDROCK_MAX_RETRIES,
+                    'mode': 'adaptive',
                 },
-                max_pool_connections=BEDROCK_MAX_POOL_CONNECTIONS,  # 동시 연결 개수
+                max_pool_connections=BEDROCK_MAX_POOL_CONNECTIONS,
             )
 
             self.bedrock_runtime = boto3.client(
@@ -74,6 +59,10 @@ class AmazonBedrock(BaseChatbotModel):
         except Exception as e:
             logger.error(f"failed to initialize bedrock client: {e}")
             raise ValueError(f"failed to initialize bedrock client: {e}")
+
+    @property
+    def describe(self) -> str:
+        return f"AmazonBedrock({self.model_id})"
 
     def _create_prompt(self, context: str, question: str) -> list:
         prompt_template = load_prompt("prompt/chatbot.md")

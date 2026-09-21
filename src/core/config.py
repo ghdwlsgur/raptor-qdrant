@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = 6333
     EMBEDDING_MODEL: str = "nlpai-lab/KURE-v1"
 
-    # AWS Bedrock 설정
-    AWS_BEARER_TOKEN_BEDROCK: str = ""
+    LLM_PROVIDER: Literal["ollama", "bedrock"] = "ollama"
+
+    OLLAMA_HOST: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
+
     AWS_REGION: str = "ap-northeast-2"
     BEDROCK_MODEL_ID: str = "apac.anthropic.claude-3-7-sonnet-20250219-v1:0"
 

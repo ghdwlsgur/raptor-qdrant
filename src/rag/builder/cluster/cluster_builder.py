@@ -4,11 +4,11 @@ import concurrent.futures
 from threading import Lock
 from typing import Dict, List
 
-import tiktoken
 from llama_index.core.schema import TextNode
-from src.rag.constants import DEFAULT_ENCODING
 from src.rag.chunker.models.chunk_metadata import ChunkMetadata, ChunkingMethod
-from src.rag.builder.models.structure import Node, Tree
+from src.rag.summarizer import is_unusable_summary
+from src.rag.utils import count_tokens
+from src.rag.builder.models.structure import Node
 from src.rag.builder.tree_builder import TreeBuilder, TreeBuilderConfig
 from src.rag.builder.utils import (
     get_node_list,
@@ -58,7 +58,9 @@ class ClusterTreeBuilder(TreeBuilder):
         self.reduction_dimension = config.reduction_dimension
         self.clustering_algorithm = config.clustering_algorithm
         self.clustering_params = config.clustering_params
-        self.tokenizer = tiktoken.get_encoding(DEFAULT_ENCODING)
+
+    def _too_few_to_cluster(self, nodes: List[Node]) -> bool:
+        return len(nodes) <= self.reduction_dimension + 1
 
     def construct_tree(
         self,
@@ -89,9 +91,10 @@ class ClusterTreeBuilder(TreeBuilder):
             summarized_text = self.summarize(text=node_texts)
 
             # 요약이 불충분하면 해당 클러스터를 건너뜀
-            if summarized_text.strip() == "NO_SUMMARY":
+            if is_unusable_summary(summarized_text):
                 logging.info(
-                    f"skipping cluster {node_index}: summarization returned NO_SUMMARY"
+                    f"skipping cluster {node_index}: unusable summary "
+                    f"{summarized_text.strip()[:40]!r}"
                 )
                 return
 
@@ -99,7 +102,7 @@ class ClusterTreeBuilder(TreeBuilder):
                 f"summarized text for node {node_index}: {summarized_text}"
             )
 
-            token_count = len(self.tokenizer.encode(summarized_text))
+            token_count = count_tokens(summarized_text)
             chunk_metadata = ChunkMetadata(
                 chunked_by=ChunkingMethod.SUMMARY, token_count=token_count
             )
@@ -124,9 +127,7 @@ class ClusterTreeBuilder(TreeBuilder):
 
             node_list_current_layer = get_node_list(current_level_nodes)
 
-            # 노드가 너무 적으면 의미 있는 클러스터링이 불가능하므로 중단
-            if len(node_list_current_layer) <= self.reduction_dimension + 1:
-                self.num_layers = layer
+            if self._too_few_to_cluster(node_list_current_layer):
                 logging.info(
                     f"stopping at layer {layer} due to insufficient nodes for clustering"
                 )
@@ -143,9 +144,12 @@ class ClusterTreeBuilder(TreeBuilder):
             )
 
             lock = Lock()
+            layer_start_index = next_node_index
+
             if use_multithreading:
-                # AWS Bedrock API 제한을 고려하여 동시 요청 수를 제한
-                max_workers = min(10, len(clusters))  # 최대 10개 동시 요청
+                max_workers = min(
+                    self.summarization_max_workers, len(clusters)
+                )
 
                 try:
                     with ThreadPoolExecutor(
@@ -194,7 +198,8 @@ class ClusterTreeBuilder(TreeBuilder):
                     logger.info(
                         "falling back to single-threaded cluster processing"
                     )
-                    next_node_index = len(all_tree_nodes)
+                    new_level_nodes.clear()
+                    next_node_index = layer_start_index
                     for cluster in clusters:
                         try:
                             process_cluster(
@@ -222,14 +227,5 @@ class ClusterTreeBuilder(TreeBuilder):
             layer_to_nodes[layer + 1] = list(new_level_nodes.values())
             current_level_nodes = new_level_nodes
             all_tree_nodes.update(new_level_nodes)
-
-            # Create tree structure for tracking (not returned)
-            _ = Tree(
-                all_tree_nodes,
-                layer_to_nodes[layer + 1],
-                layer_to_nodes[0],
-                layer + 1,
-                layer_to_nodes,
-            )
 
         return current_level_nodes

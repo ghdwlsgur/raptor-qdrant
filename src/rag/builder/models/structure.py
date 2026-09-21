@@ -23,9 +23,9 @@ class Node:
 
 @dataclass
 class Tree:
-    all_nodes: List[Node]  # 트리에 포함된 모든 노드 객체
-    root_nodes: List[Node]  # 트리의 최상위 노드
-    leaf_nodes: List[Node]  # 트리의 최하위 노드
+    all_nodes: Dict[int, Node]
+    root_nodes: Dict[int, Node]
+    leaf_nodes: Dict[int, Node]
     num_layers: int  # 트리의 레이어 개수
     layer_to_nodes: Dict[
         int, List[Node]

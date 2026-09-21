@@ -1,4 +1,3 @@
-import numpy as np
 from typing import Dict, List
 
 from .models.structure import Node

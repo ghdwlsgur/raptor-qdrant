@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import List
 
 from src.rag.builder.models.structure import Node
+from src.rag.utils import resolve_token_count
 from .utils import (
     reduce_embedding_dimensions,
     gmm_soft_cluster,
@@ -126,8 +127,12 @@ class RaptorClustering(ClusteringAlgorithm):
         return all_local_clusters
 
     def _get_node_token_count(self, node: Node) -> int:
-        """노드의 토큰 수를 메타데이터에서 가져옴"""
-        return node.metadata.get('token_count')
+        """노드의 토큰 수를 메타데이터에서 가져오되, 없으면 텍스트로 계산
+
+        메타데이터를 그대로 믿고 None 을 합산하면 TypeError 로 클러스터링 전체가
+        멈춘다. resolve_token_count 가 값이 없는 경우를 대신 계산해 준다.
+        """
+        return resolve_token_count(node.metadata, node.text)
 
     def perform_clustering(
         self,

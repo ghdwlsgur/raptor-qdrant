@@ -49,10 +49,9 @@ class KoreanEmbeddingModel(BaseEmbeddingModel):
         return self.model.get_sentence_embedding_dimension()
 
     def create_embedding(self, text: str) -> List[float]:
-        """텍스트를 임베딩 벡터로 변환"""
-        if not text.strip():
-            logger.warning("empty text provided for embedding")
-            return []
+        """텍스트를 임베딩 벡터로 변환한다. 빈 텍스트는 ValueError."""
+        if not text or not text.strip():
+            raise ValueError("cannot create an embedding for empty text")
 
         try:
             embedding = self.model.encode(text)
