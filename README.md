@@ -23,24 +23,28 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
    │     마크다운 헤더로 1차 분할 → 512토큰 넘는 섹션만 의미 기반 2차 분할
    │
    ├─ 2. 잎 노드 생성 ............ src/rag/builder/tree_builder.py
-   │     KURE-v1 임베딩, 스레드풀 병렬 (실패 시 싱글스레드 폴백)
+   │     KURE-v1 임베딩을 64개 단위 배치로. 끝나는 즉시 Qdrant 에 적재
    │
    ├─ 3. 트리 구축 (최대 5층) .... src/rag/builder/cluster/
    │     UMAP 10차원 축소 → GMM 소프트 클러스터링 (전역 → 지역 2단계)
    │     클러스터 수는 BIC로 자동 결정, 한 노드가 여러 클러스터에 동시 소속 가능
    │     클러스터가 3500토큰을 넘으면 재귀적으로 재분할
-   │     클러스터별로 LLM 요약 → 부모 노드
+   │     클러스터별로 LLM 요약 → 배치 임베딩 → 부모 노드. 레이어가 끝날 때마다 적재
+   │     실패한 클러스터만 한 번 더 시도하고, 그래도 안 되면 그 클러스터만 뺀다
    │
-   └─ 4. Qdrant 적재 ............. src/rag/retriever/qdrant_retriever.py
-         모든 층의 노드를 dense + sparse 하이브리드로 저장
-         payload: layer, node_index, document_name, chunked_by, token_count
+   └─ 4. 세대 교체 ............... src/rag/retriever/qdrant_retriever.py
+         모든 노드가 같은 tree_generation 을 달고 dense + sparse 하이브리드로 저장
+         트리가 완성되면 그 세대가 아닌 포인트(이전 트리)를 지운다
+         payload: layer, node_index, document_name, source_notes, content_hash, tree_generation
 ```
 
 층이 올라갈수록 노드 수가 줄고 남은 노드가 11개 이하가 되면 거기서 멈춘다.
 
+진행은 로그로 본다. 잎 임베딩은 배치마다, 요약은 레이어별 10% 단위로 남기고, 기본으로 `~/.local/state/raptor-qdrant/raptor-qdrant.log` 에도 같은 내용이 쓰인다. 다른 터미널에서 `tail -f` 로 보면 된다. 중간에 죽어도 그때까지 적재된 레이어는 남아 있고, 다음 `index` 가 끝나지 않은 세대를 치우고 새로 시작한다.
+
 ## 질의 파이프라인
 
-하이브리드 검색으로 상위 5개 노드를 가져오고(`alpha=0.8`, 벡터 8 대 키워드 2), 컨텍스트 예산 4096토큰이 찰 때까지 이어붙여 Bedrock에 넘긴다. 레이어 구분 없이 전부 후보에 넣는 것이 기본값이다.
+하이브리드 검색으로 상위 5개 노드를 가져오고(`alpha=0.8`, 벡터 8 대 키워드 2), 컨텍스트 예산 4096토큰이 찰 때까지 이어붙여 LLM에 넘긴다. 레이어 구분 없이 전부 후보에 넣는 것이 기본값이다.
 
 ```python
 from raptor_qdrant.database.qdrant_manager import QdrantManager
@@ -53,7 +57,6 @@ engine = RaptorEngine(EngineConfig(collection_name="obsidian"))
 notes = VaultLoader("~/Documents/Obsidian Vault").load()
 engine.add_corpus(
     {note.path: note.text for note in notes},
-    recreate_collection=True,
     note_hashes={note.path: note.content_hash for note in notes},
 )
 
@@ -97,6 +100,7 @@ Bedrock으로 돌리려면 `--llm bedrock`을 주거나 `LLM_PROVIDER=bedrock`�
 uv run raptor-qdrant index                  # 볼트 전체를 새로 인덱싱
 uv run raptor-qdrant sync --dry-run         # 무엇이 바뀌었는지만 확인
 uv run raptor-qdrant sync                   # 변경분 반영
+uv run raptor-qdrant watch                  # 저장될 때마다 잎 갱신
 uv run raptor-qdrant ask "질문"              # 질의
 uv run raptor-qdrant status                 # 적재 현황
 ```
@@ -111,12 +115,13 @@ docker compose run --rm app index
 
 | 명령 | 하는 일 |
 |---|---|
-| `index` | 볼트 전체를 새로 인덱싱한다 |
-| `sync` | 볼트와 인덱스를 비교해 달라졌으면 다시 쌓는다. `--dry-run`으로 미리 볼 수 있다 |
+| `index` | 볼트 전체로 트리를 새로 세운다. 도는 동안 락을 잡고, 끝나면 그 사이 바뀐 노트를 따라잡는다 |
+| `sync` | 볼트와 인덱스를 비교해 바뀐 노트의 잎만 갈아끼운다. `--dry-run`으로 미리 보고, `--rebuild-tree`면 요약 레이어까지 다시 세운다 |
+| `watch` | 볼트를 감시하며 저장될 때마다 잎을 갱신한다. `index`가 도는 동안은 모아뒀다가 끝난 뒤 적용한다 |
 | `ask` | 적재된 내용에 질문하고 근거 노트를 함께 보여준다 |
-| `status` | 컬렉션에 어떤 노트가 들어 있는지 보여준다 |
+| `status` | 적재 현황, 요약 레이어가 낡은 정도, 빌드가 돌고 있는지 보여준다 |
 
-공통 옵션은 `--collection`과 `--llm`이다. `index`와 `sync`는 `--vault`로 경로를 바꾼다.
+공통 옵션은 `--collection`과 `--llm`이다. `index`, `sync`, `watch`는 `--vault`로 경로를 바꾼다.
 
 ## 설정
 
@@ -128,16 +133,22 @@ docker compose run --rm app index
 | `QDRANT_PORT` | `6333` | Qdrant 포트 |
 | `VAULT_PATH` | `~/Documents/Obsidian Vault` | 옵시디언 볼트 경로 |
 | `COLLECTION_NAME` | `obsidian` | 기본 Qdrant 컬렉션 |
+| `STATE_DIR` | `~/.local/state/raptor-qdrant` | 빌드 락 같은 실행 상태를 두는 곳 |
 | `EMBEDDING_MODEL` | `nlpai-lab/KURE-v1` | SentenceTransformer 모델 (항상 로컬) |
 | `LLM_PROVIDER` | `ollama` | `ollama` 또는 `bedrock` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama 서버 주소 |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Ollama 모델 태그 |
+| `OLLAMA_SUMMARY_MODEL` | (비움) | 요약 전용 Ollama 모델. 비우면 `OLLAMA_MODEL` |
+| `SUMMARY_WORKERS` | `0` | 클러스터 요약 동시 실행 수. 0이면 공급자 기본값(ollama 2, bedrock 10) |
 | `BEDROCK_MODEL_ID` | `apac.anthropic.claude-3-7-sonnet-20250219-v1:0` | Bedrock 모델 |
 | `AWS_REGION` | `ap-northeast-2` | Bedrock 리전 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warning` / `error` / `critical` |
+| `LOG_FILE` | `~/.local/state/raptor-qdrant/raptor-qdrant.log` | 진행 로그 파일. 10MB 회전, 5개 보관. 비우면 stdout만 |
 | `ENVIRONMENT` | `local` | `production`이면 JSON 구조화 로그로 전환 |
 
-검색·청킹·트리 관련 수치는 `src/rag/constants.py`에 모여 있다. 청크 최대 토큰(512), 컨텍스트 예산(4096), top-k(5), 하이브리드 가중치(0.8) 같은 값들이다.
+검색·청킹·트리 관련 수치는 `src/rag/constants.py`에 모여 있다. 청크 최대 토큰(512), 컨텍스트 예산(4096), top-k(5), 하이브리드 가중치(0.8), 임베딩 배치(64) 같은 값들이다.
+
+인덱싱 시간의 대부분은 요약이다. Ollama 서버는 `OLLAMA_NUM_PARALLEL`(기본 1)만큼만 동시에 받으므로 `SUMMARY_WORKERS`를 올리려면 서버도 같이 올려야 하고, 슬롯마다 KV 캐시가 붙어 메모리를 더 쓴다. 메모리가 빠듯하면 `OLLAMA_SUMMARY_MODEL`에 더 작은 모델(예: `qwen2.5:3b`)을 두는 쪽이 낫다. 중간 요약은 검색 앵커 역할이라 답변 모델만큼 클 필요가 없다.
 
 ## 볼트 파싱
 
@@ -154,7 +165,13 @@ docker compose run --rm app index
 
 `sync`는 볼트의 해시와 적재된 해시를 비교해 추가·변경·삭제를 가른다. 달라진 게 없으면 아무 일도 하지 않는다.
 
-달라졌으면 트리를 다시 세운다. 잎 하나가 바뀌면 클러스터 경계가 달라지고 그 위의 요약도 전부 달라지기 때문에, 바뀐 노트만 갈아끼우면 트리가 조용히 낡는다. 정확성을 택했다.
+달라졌으면 바뀐 노트의 잎만 갈아끼운다. 트리를 다시 세우는 데는 LLM 요약이 붙어 몇십 분에서 몇 시간이 걸리니 저장할 때마다 그걸 돌릴 수는 없다. 트리 간선은 적재되지 않으므로 잎만 바꿔도 기존 요약 노드는 깨지지 않고, 내용만 그만큼 낡는다. 얼마나 낡았는지는 `tree_generation`으로 센다. 현재 트리 밖의 잎이 20%를 넘으면 `status`와 `sync`가 `--rebuild-tree`를 권한다.
+
+`watch`는 같은 일을 저장 시점마다 한다. 옵시디언이 타이핑 중에도 자주 저장하므로 파일별로 3초 조용해질 때까지 기다렸다가 한 번만 반영한다.
+
+### 재구축과 동시에 돌 때
+
+`index`는 시작 시점의 스냅샷으로 트리를 세운다. 그 사이 볼트가 바뀌어도 트리에는 없다. 그래서 `index`는 컬렉션마다 락(`STATE_DIR/<컬렉션>.build.json`)을 잡고 돌고, 끝나면 스냅샷과 지금 볼트를 비교해 그 사이 바뀐 노트만 잎으로 넣는다. 락이 잡혀 있으면 `sync`는 거절하고, `watch`는 변경을 모아뒀다가 락이 풀리면 한 번에 적용한다. 락의 pid가 죽어 있으면 끝나지 않은 빌드의 흔적이다. 다음 `index`가 그 세대의 포인트를 치우고 시작한다.
 
 ## 컬렉션과 문서
 
@@ -185,7 +202,12 @@ uv run mypy                # 타입 검사
 | 파일 | 무엇을 지키는가 |
 |---|---|
 | `test_vault_loader.py` | frontmatter 제거, 위키링크 평탄화, 해시 기반 증분 판단 |
-| `test_cli_helpers.py` | 원격 LLM 가드, 근거 노트 중복 제거 |
+| `test_cli_helpers.py` | 원격 LLM 가드, 근거 노트 중복 제거, 빌드 중 바뀐 노트 따라잡기 |
+| `test_cluster_layers.py` | 클러스터마다 요약은 한 번, 실패한 것만 재시도, 레이어별 배치 임베딩 |
+| `test_node_embedding.py` | 잎 임베딩이 배치로 나가고 이미 있는 임베딩은 다시 계산하지 않는다 |
+| `test_build_lock.py` | 살아 있는 빌드는 막고 죽은 빌드의 흔적은 넘겨준다 |
+| `test_index_health.py` | 낡은 비율과 세대 섞임 판정 |
+| `test_log_file.py` | 표준 logging 이 파일 sink 까지 닿는다 |
 | `test_chunk_tagging.py` | 청크마다 토큰 수를 따로 센다 (부모 값을 물려받으면 검색이 죽는다) |
 | `test_context_window.py` | 큰 노드 하나가 컨텍스트 전체를 비우지 않는다 |
 | `test_token_count.py` | `token_count`가 없거나 망가져도 터지지 않는다 |
@@ -200,10 +222,10 @@ uv run mypy                # 타입 검사
 ```
 src/raptor_qdrant/
 ├── cli.py                     콘솔 스크립트 진입점
-├── vault/                     옵시디언 볼트 로더와 증분 비교
+├── vault/                     옵시디언 볼트 로더, 증분 비교, 워처, 빌드 락
 ├── core/
 │   ├── config.py              pydantic-settings 기반 환경 설정
-│   └── logger.py              표준 logging을 loguru로 넘기고 KST로 출력
+│   └── logger.py              표준 logging을 loguru로 넘기고 KST로 stdout·파일에 출력
 ├── database/
 │   └── qdrant_manager.py      연결(싱글톤), 컬렉션·포인트 운영
 └── rag/
@@ -222,26 +244,8 @@ tests/                         Qdrant·LLM 없이 도는 단위 테스트
 
 임베딩 모델, 요약 모델, LLM, 청커, 클러스터링 알고리즘은 모두 추상 기반 클래스를 두고 `EngineConfig`로 주입한다. 다른 구현으로 갈아끼우려면 해당 기반 클래스만 상속하면 된다.
 
-## 알아둘 것
-
-**컬렉션 스키마는 LlamaIndex가 만든다.** 하이브리드 검색에 쓰는 dense·sparse 벡터의 이름 규약은 `QdrantVectorStore`가 정한다. 이 저장소는 같은 스키마를 따로 만들지 않는다. 양쪽이 각자 만들면 이름이 어긋나도 예외가 안 나고 하이브리드 검색이 조용히 반쪽만 동작한다.
-
-**볼트 본문은 LLM 공급자로 전송된다.** Ollama는 로컬이라 기기를 벗어나지 않지만 Bedrock은 AWS로 나간다. `index`와 `sync`는 원격 공급자일 때 `--allow-remote-llm` 없이는 거부한다.
-
-**인덱싱 비용은 볼트 크기에 비례해 커진다.** 클러스터 하나당 LLM 호출이 한 번씩 들어가고 층이 올라갈 때마다 반복된다. Bedrock이면 요금이, Ollama면 시간이 그만큼 든다.
-
-**요약 동시 실행 수는 공급자에 따라 다르다.** 로컬 모델은 요청을 직렬로 처리하므로 Ollama는 2, Bedrock은 10으로 잡아둔다. `src/rag/constants.py`의 `SUMMARIZATION_MAX_WORKERS`에서 바꾼다.
-
-**첫 실행은 느리다.** KURE-v1과 sparse 인코더 모델을 내려받는다.
-
-**로컬·스테이징 로그는 변수 값까지 찍는다.** loguru의 `diagnose=True` 설정이라 예외가 나면 스택 프레임의 지역 변수가 그대로 출력된다. 로그를 공유할 일이 있으면 `src/core/logger.py`에서 끄거나 `ENVIRONMENT=production`으로 돌린다.
-
 ## 참고
 
 - [RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval](https://arxiv.org/abs/2401.18059)
 - [KURE-v1](https://huggingface.co/nlpai-lab/KURE-v1): 한국어 검색 특화 임베딩 모델
 - [Understanding UMAP](https://pair-code.github.io/understanding-umap/)
-
-## 라이선스
-
-MIT. [LICENSE](LICENSE) 참고.
