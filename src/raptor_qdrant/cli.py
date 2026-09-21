@@ -139,7 +139,6 @@ def run_index(engine: RaptorEngine, args: argparse.Namespace) -> int:
     _, notes = load_vault(args.vault)
     indexed = engine.add_corpus(
         as_documents(notes),
-        recreate_collection=True,
         note_hashes=as_hashes(notes),
     )
     logger.info(f"indexed {len(notes)} notes into {indexed} nodes")
@@ -168,7 +167,6 @@ def run_sync(engine: RaptorEngine, args: argparse.Namespace) -> int:
     if args.rebuild_tree:
         indexed = engine.add_corpus(
             as_documents(notes),
-            recreate_collection=True,
             note_hashes=as_hashes(notes),
         )
         logger.info(

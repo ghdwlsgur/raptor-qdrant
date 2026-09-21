@@ -175,6 +175,65 @@ class QdrantManager:
             }
         )
 
+    def count_points_where(
+        self,
+        collection_name: str,
+        key: str,
+        value: Any,
+        negate: bool = False,
+    ) -> int:
+        """payload 의 key 가 value 인(negate 면 아닌) 포인트 수."""
+        if not self.collection_exists(collection_name):
+            return 0
+
+        return (
+            self.get_client()
+            .count(
+                collection_name=collection_name,
+                count_filter=self._match_filter(key, value, negate),
+                exact=True,
+            )
+            .count
+        )
+
+    def delete_points_where(
+        self,
+        collection_name: str,
+        key: str,
+        value: Any,
+        negate: bool = False,
+    ) -> int:
+        """payload 의 key 가 value 인(negate 면 아닌) 포인트를 지우고 개수를 돌려준다.
+
+        negate=True 는 "이 세대가 아닌 것 전부" 처럼 쓴다. key 가 없거나 null
+        인 포인트도 value 와 다르므로 함께 지워진다.
+        """
+        deleted = self.count_points_where(collection_name, key, value, negate)
+        if not deleted:
+            return 0
+
+        self.get_client().delete(
+            collection_name=collection_name,
+            points_selector=models.FilterSelector(
+                filter=self._match_filter(key, value, negate)
+            ),
+            wait=True,
+        )
+        self.logger.info(
+            f"deleted {deleted} points where {key} "
+            f"{'!=' if negate else '=='} {value!r}"
+        )
+        return deleted
+
+    @staticmethod
+    def _match_filter(key: str, value: Any, negate: bool) -> models.Filter:
+        condition = models.FieldCondition(
+            key=key, match=models.MatchValue(value=value)
+        )
+        if negate:
+            return models.Filter(must_not=[condition])
+        return models.Filter(must=[condition])
+
     @staticmethod
     def _document_name_filter(document_name: str) -> models.Filter:
         return models.Filter(

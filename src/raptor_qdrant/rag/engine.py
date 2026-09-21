@@ -18,6 +18,7 @@ from .builder.cluster.cluster_builder import (
     ClusterTreeBuilder,
     ClusterTreeConfig,
 )
+from .builder.models.structure import Node
 from .embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from .llm import BaseChatbotModel, create_chatbot
 from .retriever.qdrant_retriever import (
@@ -33,11 +34,12 @@ LEAF_LAYER = 0
 
 @dataclass(frozen=True)
 class IndexHealth:
-    """요약 레이어가 잎에 비해 얼마나 낡았는지."""
+    """요약 레이어가 잎에 비해 얼마나 낡았는지, 빌드가 몇 세대 섞여 있는지."""
 
     leaf_nodes: int
     summary_nodes: int
     leaves_outside_tree: int
+    generations: int = 0
 
     @property
     def drift(self) -> float:
@@ -50,12 +52,20 @@ class IndexHealth:
         return self.drift > TREE_DRIFT_WARN_RATIO
 
     @property
+    def has_mixed_generations(self) -> bool:
+        """완성된 트리는 세대가 하나다. 둘 이상이면 끝나지 않은 빌드가 남아 있다."""
+        return self.generations > 1
+
+    @property
     def summary(self) -> str:
-        return (
+        text = (
             f"leaves {self.leaf_nodes}, summaries {self.summary_nodes}, "
             f"outside the current tree {self.leaves_outside_tree} "
             f"({self.drift:.0%})"
         )
+        if self.has_mixed_generations:
+            text += f", {self.generations} tree generations mixed"
+        return text
 
 
 @dataclass
@@ -201,25 +211,56 @@ class RaptorEngine:
     def add_corpus(
         self,
         documents: Mapping[str, str],
-        recreate_collection: bool = False,
         note_hashes: Mapping[str, str] | None = None,
+        generation: str | None = None,
     ) -> int:
         """여러 문서 위에 트리 하나를 올려 적재하고 노드 수를 반환한다.
 
         문서마다 따로 트리를 세우면 문서 하나가 청크 열 몇 개뿐이라 요약 레이어가
         만들어지지 않는다. 코퍼스 전체를 한 트리로 묶어야 상위 요약이 생긴다.
+
+        적재는 레이어가 완성될 때마다 바로 한다. 잎은 임베딩이 끝나는 즉시,
+        요약 레이어는 하나씩 끝날 때마다 Qdrant 에 들어간다. 트리를 다 세운
+        뒤 한 번에 쓰면 중간에 Qdrant 가 죽거나 프로세스가 끊길 때 몇 시간이
+        통째로 날아간다. 새 노드는 모두 같은 tree_generation 을 달고, 끝나면
+        그 세대가 아닌 포인트(이전 트리, 그 사이 watch 가 넣은 잎)를 지운다.
         """
-        logger.info(f"building raptor tree from {len(documents)} documents...")
-        tree = self.tree_builder.build_from_documents(
-            documents, use_multithreading=True
+        generation = generation or uuid.uuid4().hex
+        extra = self._hash_payload(note_hashes)
+        common = {TREE_GENERATION_KEY: generation}
+        stored = 0
+
+        def persist(layer: int, nodes: list[Node]) -> None:
+            nonlocal stored
+            stored += self.retriever.add_nodes(
+                nodes,
+                layer,
+                extra_payload_by_source=extra,
+                common_payload=common,
+            )
+            logger.info(
+                f"layer {layer}: stored {len(nodes)} nodes "
+                f"({stored} so far, generation {generation[:8]})"
+            )
+
+        logger.info(
+            f"building raptor tree from {len(documents)} documents "
+            f"(generation {generation[:8]})..."
+        )
+        self.tree_builder.build_from_documents(
+            documents, use_multithreading=True, on_layer_built=persist
         )
 
-        return self.retriever.build_from_tree(
-            tree,
-            recreate_collection=recreate_collection,
-            extra_payload_by_source=self._hash_payload(note_hashes),
-            common_payload={TREE_GENERATION_KEY: uuid.uuid4().hex},
-        )
+        retired = self.retriever.retire_generations_except(generation)
+        if retired:
+            logger.info(f"retired {retired} points from earlier builds")
+
+        self.retriever.finalize()
+        return stored
+
+    def discard_generation(self, generation: str) -> int:
+        """끝나지 않은 빌드가 남긴 포인트를 지운다."""
+        return self.retriever.drop_generation(generation)
 
     def upsert_notes(
         self,
@@ -255,12 +296,12 @@ class RaptorEngine:
 
         for payload in self.manager.iter_payloads(self.collection_name):
             generation = payload.get(TREE_GENERATION_KEY)
+            if generation is not None:
+                generations.add(generation)
             if payload.get("layer") == LEAF_LAYER:
                 leaves += 1
                 if generation is None:
                     orphan_leaves += 1
-                else:
-                    generations.add(generation)
             else:
                 summaries += 1
 
@@ -268,6 +309,7 @@ class RaptorEngine:
             leaf_nodes=leaves,
             summary_nodes=summaries,
             leaves_outside_tree=orphan_leaves,
+            generations=len(generations),
         )
 
     @staticmethod

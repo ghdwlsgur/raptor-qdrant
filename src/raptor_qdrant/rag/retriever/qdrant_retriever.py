@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient, models
 
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.database.qdrant_manager import QdrantManager
-from raptor_qdrant.rag.builder.models.structure import Tree
+from raptor_qdrant.rag.builder.models.structure import Node, Tree
 from raptor_qdrant.rag.constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_COLLECTION_NAME,
@@ -23,6 +23,7 @@ from raptor_qdrant.rag.constants import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_TOP_K,
     SOURCE_KEY,
+    TREE_GENERATION_KEY,
 )
 from raptor_qdrant.rag.embedding import (
     BaseEmbeddingModel,
@@ -36,6 +37,8 @@ from .context_window import ContextWindow, assemble_context
 logger = logging.getLogger(__name__)
 
 TEXT_PAYLOAD_FIELD = "text"
+
+Payload = Mapping[str, Any]
 
 
 class QdrantRetrieverConfig:
@@ -165,51 +168,38 @@ class QdrantRetriever(BaseRetriever):
             logger.error(f"failed to initialize retriever: {e}")
             raise
 
-    def _create_text_nodes(
+    def _text_node(
         self,
-        tree: Tree,
+        node: Node,
+        layer: int | None,
         document_name: str | None,
-        extra_payload_by_source: Mapping[str, Mapping[str, Any]] | None = None,
-        common_payload: Mapping[str, Any] | None = None,
-    ) -> list[TextNode]:
-        text_nodes = []
-        for node in tree.all_nodes.values():
-            metadata: dict[str, Any] = {
-                "layer": tree.get_node_layer(node.index),
-                "node_index": node.index,
-            }
+        extra_payload_by_source: Mapping[str, Payload] | None,
+        common_payload: Payload | None,
+    ) -> TextNode:
+        metadata: dict[str, Any] = {"layer": layer, "node_index": node.index}
 
-            if document_name:
-                metadata[SOURCE_KEY] = document_name
+        if document_name:
+            metadata[SOURCE_KEY] = document_name
 
-            if node.metadata:
-                metadata.update(node.metadata)
+        if node.metadata:
+            metadata.update(node.metadata)
 
-            metadata[TOKEN_COUNT_KEY] = resolve_token_count(
-                metadata, node.text
-            )
+        metadata[TOKEN_COUNT_KEY] = resolve_token_count(metadata, node.text)
 
-            extra = (extra_payload_by_source or {}).get(
-                metadata.get(SOURCE_KEY, "")
-            )
-            if extra:
-                metadata.update(extra)
-            if common_payload:
-                metadata.update(common_payload)
+        extra = (extra_payload_by_source or {}).get(
+            metadata.get(SOURCE_KEY, "")
+        )
+        if extra:
+            metadata.update(extra)
+        if common_payload:
+            metadata.update(common_payload)
 
-            text_nodes.append(
-                TextNode(
-                    text=node.text,
-                    id_=str(uuid.uuid4()),
-                    embedding=node.embeddings[
-                        self.config.embedding_model_string
-                    ],
-                    metadata=metadata,
-                )
-            )
-
-        logger.debug(f"created {len(text_nodes)} text nodes")
-        return text_nodes
+        return TextNode(
+            text=node.text,
+            id_=str(uuid.uuid4()),
+            embedding=node.embeddings[self.config.embedding_model_string],
+            metadata=metadata,
+        )
 
     def _should_include_node(
         self,
@@ -239,16 +229,67 @@ class QdrantRetriever(BaseRetriever):
             else:
                 logger.warning(f"failed to create text index: {e}")
 
+    def add_nodes(
+        self,
+        nodes: Iterable[Node],
+        layer: int,
+        document_name: str | None = None,
+        extra_payload_by_source: Mapping[str, Payload] | None = None,
+        common_payload: Payload | None = None,
+    ) -> int:
+        """한 레이어의 노드를 바로 적재하고 적재한 수를 돌려준다.
+
+        컬렉션이 없으면 첫 적재 때 벡터 스토어가 만든다. 검색 준비는
+        finalize() 가 한다. 레이어마다 인덱스를 다시 여는 것은 낭비다.
+        """
+        self._setup_llama_embedding()
+
+        text_nodes = [
+            self._text_node(
+                node,
+                layer,
+                document_name,
+                extra_payload_by_source,
+                common_payload,
+            )
+            for node in nodes
+        ]
+        if text_nodes:
+            self._get_vector_store().add(cast(list[BaseNode], text_nodes))
+
+        logger.debug(f"layer {layer}: added {len(text_nodes)} points")
+        return len(text_nodes)
+
+    def finalize(self) -> None:
+        """적재를 마친 컬렉션을 검색 가능한 상태로 연다."""
+        self.index = VectorStoreIndex.from_vector_store(
+            self._get_vector_store()
+        )
+        self._create_keyword_search_index()
+        self._initialize_retriever()
+
+    def retire_generations_except(self, generation: str) -> int:
+        """이 세대가 아닌 포인트를 모두 지운다. 이전 트리와 세대 없는 잎이 대상이다."""
+        return self.manager.delete_points_where(
+            self.collection_name, TREE_GENERATION_KEY, generation, negate=True
+        )
+
+    def drop_generation(self, generation: str) -> int:
+        """특정 세대의 포인트만 지운다. 끝나지 않은 빌드를 치울 때 쓴다."""
+        return self.manager.delete_points_where(
+            self.collection_name, TREE_GENERATION_KEY, generation
+        )
+
     def build_from_tree(
         self,
         tree: Tree,
         document_name: str | None = None,
         recreate_collection: bool = False,
-        extra_payload_by_source: Mapping[str, Mapping[str, Any]] | None = None,
-        common_payload: Mapping[str, Any] | None = None,
+        extra_payload_by_source: Mapping[str, Payload] | None = None,
+        common_payload: Payload | None = None,
         replace_sources: Iterable[str] = (),
     ) -> int:
-        """트리를 적재하고 적재한 노드 수를 반환한다."""
+        """완성된 트리를 레이어 순서로 적재하고 적재한 노드 수를 반환한다."""
         logger.info(
             f"building index from tree with {len(tree.all_nodes)} nodes"
         )
@@ -266,21 +307,19 @@ class QdrantRetriever(BaseRetriever):
                     self.collection_name, source
                 )
 
-            self._setup_llama_embedding()
+            stored = 0
+            for layer, nodes in sorted(tree.layer_to_nodes.items()):
+                stored += self.add_nodes(
+                    nodes,
+                    layer,
+                    document_name,
+                    extra_payload_by_source,
+                    common_payload,
+                )
 
-            text_nodes = self._create_text_nodes(
-                tree, document_name, extra_payload_by_source, common_payload
-            )
-            self._get_vector_store().add(cast(list[BaseNode], text_nodes))
-            self.index = VectorStoreIndex.from_vector_store(
-                self._get_vector_store()
-            )
-
-            self._create_keyword_search_index()
-            self._initialize_retriever()
-
+            self.finalize()
             logger.info("tree indexing completed successfully")
-            return len(text_nodes)
+            return stored
         except Exception as e:
             logger.error(f"failed to build index from tree: {e}")
             raise
