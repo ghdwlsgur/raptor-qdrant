@@ -130,6 +130,25 @@ engine.add_document(text, "report", recreate_collection=True)  # 컬렉션 통�
 
 같은 `document_name`으로 두 번 `add_document()`를 부르면 중복 적재 대신 예외가 난다. 교체할 생각이었다면 `update_document()`를 쓰라는 뜻이다.
 
+## 테스트
+
+의존성 설치 후 바로 돌아간다. Qdrant나 LLM 없이 순수 로직만 검증한다.
+
+```bash
+uv run pytest tests -q
+```
+
+| 파일 | 무엇을 지키는가 |
+|---|---|
+| `test_chunk_tagging.py` | 청크마다 토큰 수를 따로 센다 (부모 값을 물려받으면 검색이 죽는다) |
+| `test_context_window.py` | 큰 노드 하나가 컨텍스트 전체를 비우지 않는다 |
+| `test_token_count.py` | `token_count`가 없거나 망가져도 터지지 않는다 |
+| `test_summary_sentinel.py` | 모델이 장식을 붙인 `NO_SUMMARY`도 걸러낸다 |
+| `test_chunk_metadata.py` | payload가 JSON으로 직렬화된다 |
+| `test_tree_structure.py` | 노드와 레이어 매핑 |
+| `test_clustering_utils.py` | 데이터가 적을 때의 클러스터 수 경계 |
+| `test_llm_factory.py` | 공급자 선택과 오류 메시지 |
+
 ## 구조
 
 ```
@@ -148,9 +167,10 @@ src/
     │   ├── tree_builder.py    잎 노드 생성, 트리 조립
     │   └── cluster/           UMAP 차원 축소 + GMM 소프트 클러스터링
     ├── summarizer/            클러스터 요약
-    ├── retriever/             Qdrant 하이브리드 검색
+    ├── retriever/             Qdrant 하이브리드 검색, 컨텍스트 예산 조립
     ├── llm/                   LLM 공급자 (base·ollama·bedrock + 팩토리)
     └── prompt/                요약·답변 프롬프트
+tests/                         Qdrant·LLM 없이 도는 단위 테스트
 ```
 
 임베딩 모델, 요약 모델, LLM, 청커, 클러스터링 알고리즘은 모두 추상 기반 클래스를 두고 `EngineConfig`로 주입한다. 다른 구현으로 갈아끼우려면 해당 기반 클래스만 상속하면 된다.
