@@ -81,6 +81,7 @@ def test_carries_layer_and_method_into_chunk_info():
             "chunked_by": "summary",
             "token_count": 10,
             "score": 0.5,
+            "sources": [],
         }
     ]
 
@@ -99,3 +100,35 @@ def test_no_nodes_yields_an_empty_window():
     assert (
         window.is_empty and window.total_tokens == 0 and window.skipped == []
     )
+
+
+def test_leaf_node_reports_its_source_note():
+    leaf = node("a", 10, 0, document_name="메모/정리.md")
+
+    assert assemble_context([leaf], max_tokens=100).sources == ["메모/정리.md"]
+
+
+def test_summary_node_reports_every_note_it_covers():
+    summary = node("s", 10, 1, source_notes=["b.md", "a.md"])
+
+    assert assemble_context([summary], max_tokens=100).sources == [
+        "b.md",
+        "a.md",
+    ]
+
+
+def test_sources_are_deduplicated_in_relevance_order():
+    window = assemble_context(
+        [
+            node("a", 10, 0, source_notes=["a.md", "b.md"]),
+            node("b", 10, 1, document_name="b.md"),
+            node("c", 10, 2, document_name="c.md"),
+        ],
+        max_tokens=100,
+    )
+
+    assert window.sources == ["a.md", "b.md", "c.md"]
+
+
+def test_no_sources_when_metadata_has_none():
+    assert assemble_context([node("a", 10, 0)], max_tokens=100).sources == []

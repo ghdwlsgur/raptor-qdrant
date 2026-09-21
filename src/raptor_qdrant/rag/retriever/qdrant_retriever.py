@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
 from llama_index.core import Settings, VectorStoreIndex
@@ -21,6 +22,7 @@ from raptor_qdrant.rag.constants import (
     DEFAULT_HYBRID_ALPHA,
     DEFAULT_MAX_TOKENS,
     DEFAULT_TOP_K,
+    SOURCE_KEY,
 )
 from raptor_qdrant.rag.embedding import (
     BaseEmbeddingModel,
@@ -164,7 +166,11 @@ class QdrantRetriever(BaseRetriever):
             raise
 
     def _create_text_nodes(
-        self, tree: Tree, document_name: str | None
+        self,
+        tree: Tree,
+        document_name: str | None,
+        extra_payload_by_source: Mapping[str, Mapping[str, Any]] | None = None,
+        common_payload: Mapping[str, Any] | None = None,
     ) -> list[TextNode]:
         text_nodes = []
         for node in tree.all_nodes.values():
@@ -174,7 +180,7 @@ class QdrantRetriever(BaseRetriever):
             }
 
             if document_name:
-                metadata["document_name"] = document_name
+                metadata[SOURCE_KEY] = document_name
 
             if node.metadata:
                 metadata.update(node.metadata)
@@ -182,6 +188,14 @@ class QdrantRetriever(BaseRetriever):
             metadata[TOKEN_COUNT_KEY] = resolve_token_count(
                 metadata, node.text
             )
+
+            extra = (extra_payload_by_source or {}).get(
+                metadata.get(SOURCE_KEY, "")
+            )
+            if extra:
+                metadata.update(extra)
+            if common_payload:
+                metadata.update(common_payload)
 
             text_nodes.append(
                 TextNode(
@@ -230,6 +244,9 @@ class QdrantRetriever(BaseRetriever):
         tree: Tree,
         document_name: str | None = None,
         recreate_collection: bool = False,
+        extra_payload_by_source: Mapping[str, Mapping[str, Any]] | None = None,
+        common_payload: Mapping[str, Any] | None = None,
+        replace_sources: Iterable[str] = (),
     ) -> int:
         """트리를 적재하고 적재한 노드 수를 반환한다."""
         logger.info(
@@ -244,9 +261,16 @@ class QdrantRetriever(BaseRetriever):
                 self.manager.drop_collection(self.collection_name)
                 self._forget_collection_handles()
 
+            for source in replace_sources:
+                self.manager.delete_points_by_document_name(
+                    self.collection_name, source
+                )
+
             self._setup_llama_embedding()
 
-            text_nodes = self._create_text_nodes(tree, document_name)
+            text_nodes = self._create_text_nodes(
+                tree, document_name, extra_payload_by_source, common_payload
+            )
             self._get_vector_store().add(cast(list[BaseNode], text_nodes))
             self.index = VectorStoreIndex.from_vector_store(
                 self._get_vector_store()

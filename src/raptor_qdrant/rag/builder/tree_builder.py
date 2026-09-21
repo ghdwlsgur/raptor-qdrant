@@ -3,6 +3,7 @@ import copy
 import logging
 import os
 from abc import abstractmethod
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 from llama_index.core.schema import TextNode
@@ -12,6 +13,7 @@ from raptor_qdrant.core.config import settings
 from raptor_qdrant.rag.chunker.hybrid_chunker import BaseChunker, HybridChunker
 from raptor_qdrant.rag.constants import (
     DEFAULT_SUMMARIZATION_MAX_WORKERS,
+    SOURCE_KEY,
     SUMMARIZATION_MAX_WORKERS,
 )
 from raptor_qdrant.rag.embedding import (
@@ -230,6 +232,65 @@ class TreeBuilder:
 
         return kept
 
+    def build_from_documents(
+        self,
+        documents: Mapping[str, str],
+        use_multithreading: bool = True,
+    ) -> Tree:
+        """여러 문서의 청크 위에 트리 하나를 올린다.
+
+        문서를 이어붙여 한 번에 청킹하면 잎마다 어느 문서에서 왔는지가 사라진다.
+        문서별로 청킹해 출처를 박은 뒤, 그 잎 전체를 대상으로 트리를 쌓는다.
+        """
+        if not documents:
+            raise ValueError("documents must not be empty")
+
+        return self._assemble(
+            self._chunk_documents(documents), use_multithreading
+        )
+
+    def _chunk_documents(self, documents: Mapping[str, str]) -> list[TextNode]:
+        if not documents:
+            raise ValueError("documents must not be empty")
+
+        nodes: list[TextNode] = []
+        for name, text in documents.items():
+            if not text or not text.strip():
+                continue
+            for node in self._chunk_into_nodes(text):
+                node.metadata = {**node.metadata, SOURCE_KEY: name}
+                nodes.append(node)
+
+        if not nodes:
+            raise ValueError("chunking produced no non-empty nodes")
+
+        logger.info(
+            f"chunked {len(documents)} documents into {len(nodes)} leaf chunks"
+        )
+        return nodes
+
+    def build_leaves_only(
+        self,
+        documents: Mapping[str, str],
+        use_multithreading: bool = True,
+    ) -> Tree:
+        """클러스터링과 요약 없이 잎 노드만 만든다.
+
+        노트 하나를 고칠 때마다 트리를 다시 세울 수는 없다. 잎은 청킹과 로컬
+        임베딩뿐이라 즉시 갱신할 수 있고, 트리 간선은 저장되지 않으므로 잎만
+        갈아끼워도 적재된 요약 노드가 깨지지 않는다.
+        """
+        nodes = self._chunk_documents(documents)
+        leaf_nodes = self._create_leaf_nodes(nodes, use_multithreading)
+
+        return Tree(
+            all_nodes=copy.deepcopy(leaf_nodes),
+            root_nodes=leaf_nodes,
+            leaf_nodes=leaf_nodes,
+            num_layers=0,
+            layer_to_nodes={0: list(leaf_nodes.values())},
+        )
+
     def build_from_text(
         self, text: str, use_multithreading: bool = True
     ) -> Tree:
@@ -238,18 +299,22 @@ class TreeBuilder:
             raise ValueError("cannot build a tree from empty text")
 
         # chunker를 사용하여 텍스트를 여러 개의 TextNode로 분할
-        nodes = self._chunk_into_nodes(text)
+        return self._assemble(self._chunk_into_nodes(text), use_multithreading)
 
-        # 분할된 TextNode들로 트리의 리프 노드 구성
+    def _create_leaf_nodes(
+        self, nodes: list[TextNode], use_multithreading: bool
+    ) -> dict[int, Node]:
         if use_multithreading:
-            leaf_nodes = self.multithreaded_create_leaf_nodes(nodes)
-        else:
-            leaf_nodes = {
-                i: self.create_node(i, node)[1]
-                for i, node in enumerate(
-                    tqdm(nodes, desc="Creating Leaf Nodes")
-                )
-            }
+            return self.multithreaded_create_leaf_nodes(nodes)
+        return {
+            i: self.create_node(i, node)[1]
+            for i, node in enumerate(tqdm(nodes, desc="Creating Leaf Nodes"))
+        }
+
+    def _assemble(
+        self, nodes: list[TextNode], use_multithreading: bool
+    ) -> Tree:
+        leaf_nodes = self._create_leaf_nodes(nodes, use_multithreading)
 
         # 모든 노드를 깊은 복사하여 all_nodes에 저장
         all_nodes = copy.deepcopy(leaf_nodes)

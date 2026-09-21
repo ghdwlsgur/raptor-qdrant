@@ -2,9 +2,18 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from raptor_qdrant.rag.constants import SOURCE_KEY, SOURCE_SET_KEY
 from raptor_qdrant.rag.utils import resolve_token_count
 
 CHUNK_SEPARATOR = "\n\n"
+
+
+def _sources_of(metadata: dict[str, Any]) -> list[str]:
+    covered = metadata.get(SOURCE_SET_KEY)
+    if covered:
+        return list(covered)
+    source = metadata.get(SOURCE_KEY)
+    return [source] if source else []
 
 
 @dataclass
@@ -21,6 +30,15 @@ class ContextWindow:
     @property
     def is_empty(self) -> bool:
         return not self.chunks
+
+    @property
+    def sources(self) -> list[str]:
+        """컨텍스트에 쓰인 원본 문서 이름을 관련도 순서대로 중복 없이 반환한다."""
+        ordered: dict[str, None] = {}
+        for info in self.chunk_info:
+            for source in info.get("sources") or []:
+                ordered.setdefault(source, None)
+        return list(ordered)
 
 
 def assemble_context(nodes: Iterable[Any], max_tokens: int) -> ContextWindow:
@@ -47,6 +65,7 @@ def assemble_context(nodes: Iterable[Any], max_tokens: int) -> ContextWindow:
                 "chunked_by": node.metadata.get("chunked_by"),
                 "token_count": tokens,
                 "score": getattr(node, "score", 0.0) or 0.0,
+                "sources": _sources_of(node.metadata),
             }
         )
 

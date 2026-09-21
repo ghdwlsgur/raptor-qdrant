@@ -18,13 +18,29 @@ from raptor_qdrant.rag.chunker.models.chunk_metadata import (
     ChunkingMethod,
     ChunkMetadata,
 )
-from raptor_qdrant.rag.constants import CLUSTER_REDUCTION_DIMENSION
+from raptor_qdrant.rag.constants import (
+    CLUSTER_REDUCTION_DIMENSION,
+    SOURCE_KEY,
+    SOURCE_SET_KEY,
+)
 from raptor_qdrant.rag.summarizer import is_unusable_summary
 from raptor_qdrant.rag.utils import count_tokens
 
 from .raptor_clustering import RaptorClustering
 
 logger = logging.getLogger(__name__)
+
+
+def _covered_sources(cluster: list[Node]) -> list[str]:
+    """클러스터가 덮는 원본 문서 이름을 모은다."""
+    sources: set[str] = set()
+    for node in cluster:
+        metadata = node.metadata or {}
+        sources.update(metadata.get(SOURCE_SET_KEY) or [])
+        source = metadata.get(SOURCE_KEY)
+        if source:
+            sources.add(source)
+    return sorted(sources)
 
 
 class ClusterTreeConfig(TreeBuilderConfig):
@@ -115,7 +131,11 @@ class ClusterTreeBuilder(TreeBuilder):
                 chunked_by=ChunkingMethod.SUMMARY, token_count=token_count
             )
             summary_node = TextNode(
-                text=summarized_text, metadata=chunk_metadata.to_dict()
+                text=summarized_text,
+                metadata={
+                    **chunk_metadata.to_dict(),
+                    SOURCE_SET_KEY: _covered_sources(cluster),
+                },
             )
 
             # 요약된 텍스트와 자식 노드 인덱스를 사용해 새로운 부모 노드 생성

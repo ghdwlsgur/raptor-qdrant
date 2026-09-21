@@ -37,3 +37,12 @@ CLUSTER_PROBABILITY_THRESHOLD = 0.5
 CLUSTER_MAX_RECURSION_DEPTH = 10
 CLUSTER_MIN_NODES_TO_SPLIT = 3
 UMAP_LOCAL_MAX_NEIGHBORS = 10
+
+# ========================================= Corpus
+SOURCE_KEY = "document_name"
+SOURCE_SET_KEY = "source_notes"
+CONTENT_HASH_KEY = "content_hash"
+TREE_GENERATION_KEY = "tree_generation"
+
+# 요약 레이어가 이만큼 낡으면 재구축을 권한다
+TREE_DRIFT_WARN_RATIO = 0.2

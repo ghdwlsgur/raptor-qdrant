@@ -155,6 +155,14 @@ class QdrantManager:
             )
             raise
 
+    def iter_payloads(self, collection_name: str) -> Iterator[dict[str, Any]]:
+        """컬렉션의 모든 payload 를 순회한다."""
+        if not self.collection_exists(collection_name):
+            return
+        for point in self._scroll_all(collection_name):
+            if point.payload:
+                yield point.payload
+
     def list_document_names(self, collection_name: str) -> list[str]:
         if not self.collection_exists(collection_name):
             return []
