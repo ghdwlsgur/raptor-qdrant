@@ -1,8 +1,8 @@
 from llama_index.core.schema import TextNode
 
-from src.rag.chunker.hybrid_chunker import tag_chunk
-from src.rag.chunker.models.chunk_metadata import ChunkingMethod
-from src.rag.utils import count_tokens
+from raptor_qdrant.rag.chunker.hybrid_chunker import tag_chunk
+from raptor_qdrant.rag.chunker.models.chunk_metadata import ChunkingMethod
+from raptor_qdrant.rag.utils import count_tokens
 
 SHORT = "짧은 청크."
 LONG = "신데렐라는 재 속에서 렌틸콩을 골라냈다. " * 40
@@ -23,7 +23,9 @@ def test_counts_each_chunk_separately():
 
 
 def test_explicit_token_count_wins():
-    node = tag_chunk(TextNode(text=SHORT), {}, ChunkingMethod.MARKDOWN, token_count=999)
+    node = tag_chunk(
+        TextNode(text=SHORT), {}, ChunkingMethod.MARKDOWN, token_count=999
+    )
 
     assert node.metadata["token_count"] == 999
 

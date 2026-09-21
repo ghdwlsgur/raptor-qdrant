@@ -1,7 +1,7 @@
 import pytest
 
-from src.rag.llm import BaseChatbotModel, create_chatbot
-from src.rag.llm.ollama import Ollama
+from raptor_qdrant.rag.llm import BaseChatbotModel, create_chatbot
+from raptor_qdrant.rag.llm.ollama import Ollama
 
 
 @pytest.mark.parametrize("name", ["ollama", "OLLAMA", "  Ollama  "])
@@ -27,7 +27,7 @@ def test_error_lists_the_supported_providers():
 
 
 def test_falls_back_to_the_configured_provider(monkeypatch):
-    from src.core.config import settings
+    from raptor_qdrant.core.config import settings
 
     monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
 
@@ -35,5 +35,10 @@ def test_falls_back_to_the_configured_provider(monkeypatch):
 
 
 def test_model_tag_is_normalised_for_health_check():
-    assert Ollama(model="qwen2.5")._fully_qualified_model_tag() == "qwen2.5:latest"
-    assert Ollama(model="qwen2.5:7b")._fully_qualified_model_tag() == "qwen2.5:7b"
+    assert (
+        Ollama(model="qwen2.5")._fully_qualified_model_tag()
+        == "qwen2.5:latest"
+    )
+    assert (
+        Ollama(model="qwen2.5:7b")._fully_qualified_model_tag() == "qwen2.5:7b"
+    )

@@ -1,6 +1,6 @@
 import pytest
 
-from src.rag.utils import count_tokens, resolve_token_count
+from raptor_qdrant.rag.utils import count_tokens, resolve_token_count
 
 
 def test_uses_stored_count_when_present():
@@ -18,11 +18,23 @@ def test_zero_is_a_valid_stored_count():
 @pytest.mark.parametrize(
     "stored",
     [None, -3, True, False, "n/a", "", 3.5, [], {}],
-    ids=["none", "negative", "true", "false", "words", "empty", "float", "list", "dict"],
+    ids=[
+        "none",
+        "negative",
+        "true",
+        "false",
+        "words",
+        "empty",
+        "float",
+        "list",
+        "dict",
+    ],
 )
 def test_falls_back_to_counting_the_text(stored):
     text = "신데렐라는 재를 골라냈다."
-    assert resolve_token_count({"token_count": stored}, text) == count_tokens(text)
+    assert resolve_token_count({"token_count": stored}, text) == count_tokens(
+        text
+    )
 
 
 @pytest.mark.parametrize("metadata", [None, {}], ids=["none", "empty"])

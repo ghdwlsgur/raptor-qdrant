@@ -1,8 +1,12 @@
 [project]
 name = "raptor-qdrant"
 version = "0.1.0"
-description = "RAPTOR hierarchical-tree RAG for Korean documents — KURE-v1 embeddings, Qdrant hybrid search, pluggable LLM (Ollama / Bedrock)"
+description = "RAPTOR hierarchical-tree RAG for Korean documents: KURE-v1 embeddings, Qdrant hybrid search, pluggable LLM (Ollama / Bedrock)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "HongJinHyeok" }]
+keywords = ["rag", "raptor", "qdrant", "korean-nlp", "hybrid-search"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "loguru>=0.7.3",
@@ -25,7 +29,55 @@ dependencies = [
     "fastembed>=0.7.3",
 ]
 
+[project.scripts]
+raptor-qdrant = "raptor_qdrant.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/raptor_qdrant"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.14.0",
+    "mypy>=1.18.0",
+    "types-tqdm>=4.66",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["raptor_qdrant"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]

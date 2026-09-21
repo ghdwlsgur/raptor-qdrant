@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from src.rag.chunker.models.chunk_metadata import ChunkMetadata, ChunkingMethod
+from raptor_qdrant.rag.chunker.models.chunk_metadata import (
+    ChunkingMethod,
+    ChunkMetadata,
+)
 
 
 @pytest.mark.parametrize("method", list(ChunkingMethod))
@@ -21,4 +24,7 @@ def test_payload_survives_json_round_trip(method):
 
 
 def test_keeps_token_count():
-    assert ChunkMetadata(ChunkingMethod.SUMMARY, 137).to_dict()["token_count"] == 137
+    assert (
+        ChunkMetadata(ChunkingMethod.SUMMARY, 137).to_dict()["token_count"]
+        == 137
+    )

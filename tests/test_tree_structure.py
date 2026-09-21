@@ -1,10 +1,12 @@
 import pytest
 
-from src.rag.builder.models.structure import Node, Tree
+from raptor_qdrant.rag.builder.models.structure import Node, Tree
 
 
 def make_node(index: int) -> Node:
-    return Node(text=f"node-{index}", index=index, children=set(), embeddings={})
+    return Node(
+        text=f"node-{index}", index=index, children=set(), embeddings={}
+    )
 
 
 @pytest.fixture

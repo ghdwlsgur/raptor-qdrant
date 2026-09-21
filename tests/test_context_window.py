@@ -1,15 +1,15 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
-from src.rag.retriever.context_window import assemble_context
+from raptor_qdrant.rag.retriever.context_window import assemble_context
 
 
 @dataclass
 class FakeNode:
     text: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     score: float = 0.0
 
 
@@ -53,7 +53,9 @@ def test_reports_empty_when_nothing_fits():
 
 
 def test_joins_chunks_with_a_blank_line():
-    window = assemble_context([node("a", 1, 0), node("b", 1, 1)], max_tokens=100)
+    window = assemble_context(
+        [node("a", 1, 0), node("b", 1, 1)], max_tokens=100
+    )
 
     assert window.text == "a\n\nb"
 
@@ -94,4 +96,6 @@ def test_missing_score_becomes_zero(score):
 def test_no_nodes_yields_an_empty_window():
     window = assemble_context([], max_tokens=4096)
 
-    assert window.is_empty and window.total_tokens == 0 and window.skipped == []
+    assert (
+        window.is_empty and window.total_tokens == 0 and window.skipped == []
+    )

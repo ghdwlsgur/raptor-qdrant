@@ -1,6 +1,6 @@
 import pytest
 
-from src.rag.summarizer import NO_SUMMARY, is_unusable_summary
+from raptor_qdrant.rag.summarizer import NO_SUMMARY, is_unusable_summary
 
 
 @pytest.mark.parametrize(

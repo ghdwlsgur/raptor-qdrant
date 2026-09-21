@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from src.rag.builder.cluster.utils import (
+from raptor_qdrant.rag.builder.cluster.utils import (
     get_optimal_cluster_count,
     gmm_soft_cluster,
     reduce_embedding_dimensions,
