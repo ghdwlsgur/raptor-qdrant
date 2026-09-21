@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     )
     ENVIRONMENT: Literal["local", "staging", "production"] = "local"
 
+    VAULT_PATH: str = "~/Documents/Obsidian Vault"
+    COLLECTION_NAME: str = "obsidian"
+
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     EMBEDDING_MODEL: str = "nlpai-lab/KURE-v1"
