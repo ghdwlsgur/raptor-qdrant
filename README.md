@@ -1,12 +1,18 @@
 # raptor-qdrant
 
-RAPTOR 방식의 계층형 RAG 파이프라인이다. 한국어 문서를 넣으면 요약 트리를 만들어 Qdrant에 적재하고, 질문을 던지면 트리 전체를 뒤져 답한다. 임베딩은 로컬 KURE-v1이 처리하고, 요약과 답변 생성은 Ollama(로컬)나 AWS Bedrock 중에 고른다.
+옵시디언 볼트를 위한 RAPTOR 계층형 RAG다. 볼트 전체에 요약 트리 하나를 올려 Qdrant에 적재하고, 질문에는 근거 노트를 함께 답한다. 임베딩은 로컬 KURE-v1이 처리하고, 요약과 답변은 Ollama(로컬)나 AWS Bedrock 중에 고른다.
 
 ## 왜 트리인가
 
 보통의 RAG는 문서를 잘라 청크를 그대로 벡터DB에 넣는다. "3장에서 A가 왜 실패했나" 같은 질문은 잘 맞히지만 "전체 과정을 순서대로"처럼 문서를 넓게 봐야 하는 질문은 청크 몇 개로 답이 안 나온다. 검색이 가져온 조각들 사이의 맥락이 통째로 빠져 있기 때문이다.
 
 RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 요약하고 그 요약들을 다시 묶어 요약하기를 반복해 트리를 만든다. 검색할 때는 잎(원문 청크)과 상위 요약 노드를 같은 공간에 펼쳐두고 한꺼번에 뒤진다(collapsed tree). 세부 질문은 잎에서 걸리고 개괄 질문은 요약 노드에서 걸린다.
+
+### 볼트 전체에 트리 하나를 올리는 이유
+
+노트마다 트리를 따로 세우면 RAPTOR가 아무 일도 하지 않는다. 노트 하나는 보통 청크 대여섯 개라 클러스터링 중단 임계(`reduction_dimension + 1`, 기본 11)에 못 미쳐 요약 레이어가 생기지 않는다. 그러면 평범한 청크 검색과 다를 게 없다.
+
+값어치는 노트를 가로지르는 데서 나온다. 여러 노트에 흩어진 내용이 한 클러스터로 묶이고 그 요약이 검색 대상이 되어야 "이 주제로 내가 남긴 것 전반" 같은 질문에 답할 수 있다. 그래서 `build_from_documents`가 노트별로 청킹해 잎마다 출처를 박은 뒤, 그 잎 전체에 트리 하나를 세운다.
 
 ## 인덱싱 파이프라인
 
@@ -38,20 +44,25 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
 
 ```python
 from raptor_qdrant.database.qdrant_manager import QdrantManager
+from raptor_qdrant.vault import VaultLoader
 from raptor_qdrant import EngineConfig, RaptorEngine
 
 QdrantManager().connect()
-engine = RaptorEngine(EngineConfig(collection_name="my-docs"))
+engine = RaptorEngine(EngineConfig(collection_name="obsidian"))
 
-engine.add_document(open("report.md").read(), document_name="report")
+notes = VaultLoader("~/Documents/Obsidian Vault").load()
+engine.add_corpus(
+    {note.path: note.text for note in notes},
+    recreate_collection=True,
+    note_hashes={note.path: note.content_hash for note in notes},
+)
 
-result = engine.query("핵심 결론이 뭔가요?")
+result = engine.query("이 주제로 내가 정리해둔 게 뭐가 있나?")
 print(result.answer)
-for chunk in result.chunks:
-    print(chunk["layer_number"], chunk["score"], chunk["token_count"])
+print(result.sources)
 ```
 
-`query()`는 답변과 근거 청크를 한 번에 돌려준다. 답변 문자열만 필요하면 `answer()`를 쓰면 되는데, 둘을 따로 부르면 같은 질문으로 검색이 두 번 돈다.
+`query()`는 답변과 근거를 한 번에 돌려준다. 답변 문자열만 필요하면 `answer()`를 쓰면 되는데, 둘을 따로 부르면 같은 질문으로 검색이 두 번 돈다. `result.sources`는 답변이 참고한 노트를 관련도 순서로 준다. 요약 노드는 자기가 덮는 노트를 전부 물고 있어서 상위 레이어가 걸려도 출처를 잃지 않는다.
 
 ## 시작하기
 
@@ -83,9 +94,11 @@ Bedrock으로 돌리려면 `--llm bedrock`을 주거나 `LLM_PROVIDER=bedrock`�
 **4. 실행**
 
 ```bash
-uv run raptor-qdrant                                   # 기본 문서 인덱싱 + 예시 질문
-uv run raptor-qdrant --file data/sample_en.txt         # 다른 문서
-uv run raptor-qdrant --skip-index --question "질문은?"  # 이미 적재된 컬렉션에 질의만
+uv run raptor-qdrant index                  # 볼트 전체를 새로 인덱싱
+uv run raptor-qdrant sync --dry-run         # 무엇이 바뀌었는지만 확인
+uv run raptor-qdrant sync                   # 변경분 반영
+uv run raptor-qdrant ask "질문"              # 질의
+uv run raptor-qdrant status                 # 적재 현황
 ```
 
 Docker 로 통째로 띄우려면 compose 를 쓴다. Qdrant 가 함께 올라오고, Ollama 는
@@ -93,18 +106,17 @@ Docker 로 통째로 띄우려면 compose 를 쓴다. Qdrant 가 함께 올라�
 못 쓰기 때문이다.
 
 ```bash
-docker compose run --rm app --file data/sample_ko.txt
+docker compose run --rm app index
 ```
 
-| 옵션 | 설명 |
+| 명령 | 하는 일 |
 |---|---|
-| `--file` | 인덱싱할 문서 경로 (기본 `data/sample_ko.txt`) |
-| `--collection` | Qdrant 컬렉션 이름 (기본 `sample`) |
-| `--document-name` | 문서 구분 이름 (기본: 파일 이름) |
-| `--llm` | `ollama` 또는 `bedrock` (기본: `LLM_PROVIDER` 설정값) |
-| `--question` | 질문. 여러 번 줄 수 있다 |
-| `--skip-index` | 인덱싱 없이 질의만 |
-| `--recreate` | 적재 전에 컬렉션을 통째로 삭제 |
+| `index` | 볼트 전체를 새로 인덱싱한다 |
+| `sync` | 볼트와 인덱스를 비교해 달라졌으면 다시 쌓는다. `--dry-run`으로 미리 볼 수 있다 |
+| `ask` | 적재된 내용에 질문하고 근거 노트를 함께 보여준다 |
+| `status` | 컬렉션에 어떤 노트가 들어 있는지 보여준다 |
+
+공통 옵션은 `--collection`과 `--llm`이다. `index`와 `sync`는 `--vault`로 경로를 바꾼다.
 
 ## 설정
 
@@ -114,6 +126,8 @@ docker compose run --rm app --file data/sample_ko.txt
 |---|---|---|
 | `QDRANT_HOST` | `localhost` | Qdrant 호스트 |
 | `QDRANT_PORT` | `6333` | Qdrant 포트 |
+| `VAULT_PATH` | `~/Documents/Obsidian Vault` | 옵시디언 볼트 경로 |
+| `COLLECTION_NAME` | `obsidian` | 기본 Qdrant 컬렉션 |
 | `EMBEDDING_MODEL` | `nlpai-lab/KURE-v1` | SentenceTransformer 모델 (항상 로컬) |
 | `LLM_PROVIDER` | `ollama` | `ollama` 또는 `bedrock` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama 서버 주소 |
@@ -125,6 +139,23 @@ docker compose run --rm app --file data/sample_ko.txt
 
 검색·청킹·트리 관련 수치는 `src/rag/constants.py`에 모여 있다. 청크 최대 토큰(512), 컨텍스트 예산(4096), top-k(5), 하이브리드 가중치(0.8) 같은 값들이다.
 
+## 볼트 파싱
+
+로더가 노트마다 하는 일은 이렇다.
+
+- YAML frontmatter를 본문에서 떼어내 태그로 옮긴다. 남겨두면 모든 청크 앞머리가 YAML이라 임베딩이 오염된다
+- `[[위키링크]]`는 표시 텍스트만 본문에 남기고 대상은 따로 기록한다
+- `![[이미지]]` 임베드는 버린다
+- `#태그`를 본문에서 모은다
+- 원본 파일의 SHA-256을 남긴다. `sync`가 이 값으로 변경을 판단한다
+- `.obsidian`, `.trash`, `.git`, `node_modules`와 빈 노트는 건너뛴다
+
+## 증분 동기화
+
+`sync`는 볼트의 해시와 적재된 해시를 비교해 추가·변경·삭제를 가른다. 달라진 게 없으면 아무 일도 하지 않는다.
+
+달라졌으면 트리를 다시 세운다. 잎 하나가 바뀌면 클러스터 경계가 달라지고 그 위의 요약도 전부 달라지기 때문에, 바뀐 노트만 갈아끼우면 트리가 조용히 낡는다. 정확성을 택했다.
+
 ## 컬렉션과 문서
 
 `collection_name`은 도메인이나 카테고리 단위, `document_name`은 그 안의 개별 문서 단위다. 한 컬렉션에 여러 문서를 담는 것이 기본 사용 방식이라, `add_document()`는 컬렉션을 지우지 않는다.
@@ -133,9 +164,7 @@ docker compose run --rm app --file data/sample_ko.txt
 engine.list_documents()  # 이 컬렉션의 문서명 목록
 engine.update_document(text, "report")  # 기존 문서 교체
 engine.delete_document("report")  # 문서 단위 삭제
-engine.add_document(
-    text, "report", recreate_collection=True
-)  # 컬렉션 통째로 비우고 적재
+engine.indexed_content_hashes()  # 증분 판단용 해시
 ```
 
 같은 `document_name`으로 두 번 `add_document()`를 부르면 중복 적재 대신 예외가 난다. 교체할 생각이었다면 `update_document()`를 쓰라는 뜻이다.
@@ -155,6 +184,8 @@ uv run mypy                # 타입 검사
 
 | 파일 | 무엇을 지키는가 |
 |---|---|
+| `test_vault_loader.py` | frontmatter 제거, 위키링크 평탄화, 해시 기반 증분 판단 |
+| `test_cli_helpers.py` | 원격 LLM 가드, 근거 노트 중복 제거 |
 | `test_chunk_tagging.py` | 청크마다 토큰 수를 따로 센다 (부모 값을 물려받으면 검색이 죽는다) |
 | `test_context_window.py` | 큰 노드 하나가 컨텍스트 전체를 비우지 않는다 |
 | `test_token_count.py` | `token_count`가 없거나 망가져도 터지지 않는다 |
@@ -169,6 +200,7 @@ uv run mypy                # 타입 검사
 ```
 src/raptor_qdrant/
 ├── cli.py                     콘솔 스크립트 진입점
+├── vault/                     옵시디언 볼트 로더와 증분 비교
 ├── core/
 │   ├── config.py              pydantic-settings 기반 환경 설정
 │   └── logger.py              표준 logging을 loguru로 넘기고 KST로 출력
@@ -194,7 +226,9 @@ tests/                         Qdrant·LLM 없이 도는 단위 테스트
 
 **컬렉션 스키마는 LlamaIndex가 만든다.** 하이브리드 검색에 쓰는 dense·sparse 벡터의 이름 규약은 `QdrantVectorStore`가 정한다. 이 저장소는 같은 스키마를 따로 만들지 않는다. 양쪽이 각자 만들면 이름이 어긋나도 예외가 안 나고 하이브리드 검색이 조용히 반쪽만 동작한다.
 
-**인덱싱 비용은 문서 크기에 비례해 커진다.** 클러스터 하나당 LLM 호출이 한 번씩 들어가고 층이 올라갈 때마다 반복된다. Bedrock이면 요금이, Ollama면 시간이 그만큼 든다. 큰 문서를 넣기 전에 작은 것으로 먼저 확인하는 편이 낫다.
+**볼트 본문은 LLM 공급자로 전송된다.** Ollama는 로컬이라 기기를 벗어나지 않지만 Bedrock은 AWS로 나간다. `index`와 `sync`는 원격 공급자일 때 `--allow-remote-llm` 없이는 거부한다.
+
+**인덱싱 비용은 볼트 크기에 비례해 커진다.** 클러스터 하나당 LLM 호출이 한 번씩 들어가고 층이 올라갈 때마다 반복된다. Bedrock이면 요금이, Ollama면 시간이 그만큼 든다.
 
 **요약 동시 실행 수는 공급자에 따라 다르다.** 로컬 모델은 요청을 직렬로 처리하므로 Ollama는 2, Bedrock은 10으로 잡아둔다. `src/rag/constants.py`의 `SUMMARIZATION_MAX_WORKERS`에서 바꾼다.
 
