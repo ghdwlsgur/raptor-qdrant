@@ -5,6 +5,14 @@ from abc import ABC, abstractmethod
 from typing import List
 
 from src.rag.builder.models.structure import Node
+from src.rag.constants import (
+    CLUSTER_MAX_RECURSION_DEPTH,
+    CLUSTER_MAX_TOKENS,
+    CLUSTER_MIN_NODES_TO_SPLIT,
+    CLUSTER_PROBABILITY_THRESHOLD,
+    CLUSTER_REDUCTION_DIMENSION,
+    UMAP_LOCAL_MAX_NEIGHBORS,
+)
 from src.rag.utils import resolve_token_count
 from .utils import (
     reduce_embedding_dimensions,
@@ -26,9 +34,9 @@ class ClusteringAlgorithm(ABC):
 class RaptorClustering(ClusteringAlgorithm):
     def __init__(
         self,
-        max_length_in_cluster: int = 3500,
-        reduction_dimension: int = 10,
-        threshold: float = 0.5,
+        max_length_in_cluster: int = CLUSTER_MAX_TOKENS,
+        reduction_dimension: int = CLUSTER_REDUCTION_DIMENSION,
+        threshold: float = CLUSTER_PROBABILITY_THRESHOLD,
     ):
         """
         RaptorClustering 인스턴스를 생성할 때 필요한 설정을 초기화하고 저장
@@ -85,7 +93,11 @@ class RaptorClustering(ClusteringAlgorithm):
                 # Local 클러스터링을 위해 현재 Global 클러스터 내의 임베딩들만 차원 축소 및 GMM 수행
                 # n_neighbors를 데이터 크기에 맞게 동적으로 설정
                 n_neighbors = max(
-                    2, min(10, len(global_cluster_embeddings_) - 1)
+                    2,
+                    min(
+                        UMAP_LOCAL_MAX_NEIGHBORS,
+                        len(global_cluster_embeddings_) - 1,
+                    ),
                 )
                 reduced_embeddings_local = umap.UMAP(
                     n_neighbors=n_neighbors,
@@ -161,7 +173,7 @@ class RaptorClustering(ClusteringAlgorithm):
             return []
 
         # 노드 수가 너무 적으면 더 이상 분할하지 않음
-        if len(nodes) <= 3:
+        if len(nodes) <= CLUSTER_MIN_NODES_TO_SPLIT:
             return [nodes]
 
         # 각 Node 객체에서 저장된 모델의 임베딩 벡터를 추출하여 Numpy 배열로 변환 (객체 -> 숫자)
@@ -199,8 +211,8 @@ class RaptorClustering(ClusteringAlgorithm):
             # 클러스터가 너무 길고, 노드 수가 3개 이상이고, 재귀 깊이가 한계 내일 때만 재분할
             if (
                 total_length > self.max_length_in_cluster
-                and len(cluster_nodes) > 3
-                and recursion_depth < 10
+                and len(cluster_nodes) > CLUSTER_MIN_NODES_TO_SPLIT
+                and recursion_depth < CLUSTER_MAX_RECURSION_DEPTH
             ):
                 logger.info(
                     f"reclustering cluster with {len(cluster_nodes)} nodes (depth: {recursion_depth})"

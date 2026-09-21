@@ -10,6 +10,7 @@ from llama_index.core.vector_stores.types import VectorStoreQueryMode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from .base_retriever import BaseRetriever
+from .context_window import ContextWindow, assemble_context
 from src.database.qdrant_manager import QdrantManager
 from src.rag.embedding import BaseEmbeddingModel, KoreanEmbeddingModel
 from src.rag.builder.models.structure import Tree
@@ -267,55 +268,38 @@ class QdrantRetriever(BaseRetriever):
                 self._initialize_retriever()
 
             retrieved_nodes = self.retriever.retrieve(query)
+            eligible_nodes = [
+                node
+                for node in retrieved_nodes
+                if self._should_include_node(node, collapse_tree, start_layer)
+            ]
 
-            chunks: List[str] = []
-            total_tokens = 0
-            tree_layer: List[Dict[str, Any]] = []
-            skipped: List[Tuple[Any, int]] = []
+            window = assemble_context(eligible_nodes, self.config.max_tokens)
+            self._log_window(window, len(retrieved_nodes))
 
-            for node in retrieved_nodes:
-                if not self._should_include_node(
-                    node, collapse_tree, start_layer
-                ):
-                    continue
-
-                tokens = resolve_token_count(node.metadata, node.text)
-
-                if total_tokens + tokens > self.config.max_tokens:
-                    skipped.append((node.metadata.get('node_index'), tokens))
-                    continue
-
-                chunks.append(node.text)
-                total_tokens += tokens
-                tree_layer.append(
-                    {
-                        "node_index": node.metadata.get('node_index'),
-                        "layer_number": node.metadata.get('layer'),
-                        "chunked_by": node.metadata.get('chunked_by'),
-                        "token_count": tokens,
-                        "score": getattr(node, 'score', 0.0) or 0.0,
-                    }
-                )
-
-            if skipped:
-                logger.info(
-                    f"skipped {len(skipped)} node(s) that did not fit in the "
-                    f"remaining context budget "
-                    f"({total_tokens}/{self.config.max_tokens} tokens used): "
-                    f"{skipped}"
-                )
-            if retrieved_nodes and not chunks:
-                logger.warning(
-                    f"all {len(retrieved_nodes)} retrieved nodes were dropped. "
-                    f"every node is larger than max_tokens "
-                    f"({self.config.max_tokens}) — raise it or chunk smaller"
-                )
-
-            logger.info(
-                f"retrieved {len(tree_layer)} chunks with {total_tokens} tokens"
-            )
-            return "\n\n".join(chunks), tree_layer
+            return window.text, window.chunk_info
 
         except Exception as e:
             logger.error(f"failed to retrieve context: {e}")
             raise
+
+    def _log_window(self, window: ContextWindow, retrieved_count: int) -> None:
+        if window.skipped:
+            logger.info(
+                f"skipped {len(window.skipped)} node(s) that did not fit in the "
+                f"remaining context budget "
+                f"({window.total_tokens}/{self.config.max_tokens} tokens used): "
+                f"{window.skipped}"
+            )
+
+        if retrieved_count and window.is_empty:
+            logger.warning(
+                f"all {retrieved_count} retrieved nodes were dropped. every node "
+                f"is larger than max_tokens ({self.config.max_tokens}) — raise it "
+                "or chunk smaller"
+            )
+
+        logger.info(
+            f"retrieved {len(window.chunk_info)} chunks "
+            f"with {window.total_tokens} tokens"
+        )

@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from llama_index.core.schema import TextNode
 from src.rag.chunker.models.chunk_metadata import ChunkMetadata, ChunkingMethod
+from src.rag.constants import CLUSTER_REDUCTION_DIMENSION
 from src.rag.summarizer import is_unusable_summary
 from src.rag.utils import count_tokens
 from src.rag.builder.models.structure import Node
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ClusterTreeConfig(TreeBuilderConfig):
     def __init__(
         self,
-        reduction_dimension=10,  # 차원 축소의 목표 차원 수
+        reduction_dimension=CLUSTER_REDUCTION_DIMENSION,  # 차원 축소의 목표 차원 수
         clustering_algorithm=RaptorClustering,  # 클러스터링 알고리즘
         clustering_params={},  # 선택한 클러스터링 알고리즘에 전달할 추가 매개변수
         *args,
@@ -92,13 +93,13 @@ class ClusterTreeBuilder(TreeBuilder):
 
             # 요약이 불충분하면 해당 클러스터를 건너뜀
             if is_unusable_summary(summarized_text):
-                logging.info(
+                logger.info(
                     f"skipping cluster {node_index}: unusable summary "
                     f"{summarized_text.strip()[:40]!r}"
                 )
                 return
 
-            logging.info(
+            logger.info(
                 f"summarized text for node {node_index}: {summarized_text}"
             )
 
@@ -123,12 +124,12 @@ class ClusterTreeBuilder(TreeBuilder):
         # 설정된 레이어 수만큼 아래에서 위로 반복하여 트리를 구축
         for layer in range(self.num_layers):
             new_level_nodes = {}
-            logging.info(f"constructing layer {layer}")
+            logger.info(f"constructing layer {layer}")
 
             node_list_current_layer = get_node_list(current_level_nodes)
 
             if self._too_few_to_cluster(node_list_current_layer):
-                logging.info(
+                logger.info(
                     f"stopping at layer {layer} due to insufficient nodes for clustering"
                 )
                 break
