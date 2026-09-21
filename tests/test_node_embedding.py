@@ -1,5 +1,11 @@
 from llama_index.core.schema import TextNode
 
+from fakes import (
+    CountingEmbedding,
+    FixedSummary,
+    SinglesOnly,
+    WholeNoteChunker,
+)
 from raptor_qdrant.rag.builder import tree_builder as tb
 from raptor_qdrant.rag.builder.models.structure import Node
 from raptor_qdrant.rag.builder.tree_builder import (
@@ -7,57 +13,7 @@ from raptor_qdrant.rag.builder.tree_builder import (
     TreeBuilder,
     TreeBuilderConfig,
 )
-from raptor_qdrant.rag.chunker.hybrid_chunker import BaseChunker
 from raptor_qdrant.rag.constants import SOURCE_KEY
-from raptor_qdrant.rag.embedding import BaseEmbeddingModel
-from raptor_qdrant.rag.summarizer import BaseSummarizationModel
-
-
-class CountingEmbedding(BaseEmbeddingModel):
-    """배치 호출과 단건 호출을 따로 센다."""
-
-    def __init__(self) -> None:
-        self.batches: list[int] = []
-        self.singles = 0
-
-    def create_embedding(self, text: str) -> list[float]:
-        self.singles += 1
-        return [float(len(text)), 0.0]
-
-    def create_embeddings(self, texts: list[str]) -> list[list[float]]:
-        self.batches.append(len(texts))
-        return [[float(len(text)), 0.0] for text in texts]
-
-    @property
-    def embedding_dimension(self) -> int:
-        return 2
-
-    @property
-    def model_name(self) -> str:
-        return "fake"
-
-
-class SinglesOnly(BaseEmbeddingModel):
-    def create_embedding(self, text: str) -> list[float]:
-        return [float(len(text))]
-
-    @property
-    def embedding_dimension(self) -> int:
-        return 1
-
-    @property
-    def model_name(self) -> str:
-        return "singles"
-
-
-class WholeNoteChunker(BaseChunker):
-    def chunk(self, text: str) -> list[TextNode]:
-        return [TextNode(text=text)]
-
-
-class FixedSummary(BaseSummarizationModel):
-    def summarize(self, text: str) -> str:
-        return "요약이다. 스무 글자는 넘겨야 쓸 만하다고 본다."
 
 
 class LeavesAsRoots(TreeBuilder):

@@ -50,3 +50,6 @@ TREE_DRIFT_WARN_RATIO = 0.2
 # ========================================= Embedding
 # 잎·요약 노드를 임베딩할 때 한 번에 encode 에 넘기는 텍스트 수
 EMBEDDING_BATCH_SIZE = 64
+
+# 레이어 요약 진행률을 이 횟수만큼 나눠 로그로 남긴다 (10 이면 10% 단위)
+SUMMARY_PROGRESS_STEPS = 10

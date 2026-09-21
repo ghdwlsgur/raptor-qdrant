@@ -1,7 +1,7 @@
 import concurrent.futures
 import logging
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 
 from llama_index.core.schema import TextNode
 
@@ -23,6 +23,7 @@ from raptor_qdrant.rag.constants import (
     CLUSTER_REDUCTION_DIMENSION,
     SOURCE_KEY,
     SOURCE_SET_KEY,
+    SUMMARY_PROGRESS_STEPS,
 )
 from raptor_qdrant.rag.summarizer import is_unusable_summary
 from raptor_qdrant.rag.utils import count_tokens
@@ -31,8 +32,10 @@ from .raptor_clustering import RaptorClustering
 
 logger = logging.getLogger(__name__)
 
+Cluster = list[Node]
 
-def _covered_sources(cluster: list[Node]) -> list[str]:
+
+def _covered_sources(cluster: Cluster) -> list[str]:
     """클러스터가 덮는 원본 문서 이름을 모은다."""
     sources: set[str] = set()
     for node in cluster:
@@ -42,6 +45,26 @@ def _covered_sources(cluster: list[Node]) -> list[str]:
         if source:
             sources.add(source)
     return sorted(sources)
+
+
+class _ProgressReporter:
+    """정해진 단계마다 한 줄씩 진행률을 남긴다. 클러스터마다 찍으면 로그가 넘친다."""
+
+    def __init__(
+        self, label: str, total: int, steps: int = SUMMARY_PROGRESS_STEPS
+    ):
+        self.label = label
+        self.total = total
+        self.done = 0
+        self.every = max(1, total // steps)
+
+    def step(self) -> None:
+        self.done += 1
+        if self.done == self.total or self.done % self.every == 0:
+            logger.info(
+                f"{self.label}: {self.done}/{self.total} clusters summarized "
+                f"({self.done / self.total:.0%})"
+            )
 
 
 class ClusterTreeConfig(TreeBuilderConfig):
@@ -94,170 +117,150 @@ class ClusterTreeBuilder(TreeBuilder):
         use_multithreading: bool = False,
         on_layer_built: LayerCallback | None = None,
     ) -> dict[int, Node]:
-        """TreeBuilder의 추상 메서드 구현
-        리프 노드로부터 시작하여 클러스터링과 요약을 반복하며 상위 레이어의 노드를 생성
-        """
-
-        # 시작점은 레이어 0, 즉 리프 노드
+        """잎에서 시작해 클러스터링과 요약을 반복하며 위로 레이어를 쌓는다."""
         current_level_nodes = {node.index: node for node in layer_to_nodes[0]}
-        # 새로 만들 노드의 인덱스는 기존 노드 수 다음 번호부터 시작
-        next_node_index = len(all_tree_nodes)
+        next_node_index = max(all_tree_nodes, default=-1) + 1
 
-        def process_cluster(
-            cluster: list[Node],
-            new_level_nodes: dict[int, Node],
-            node_index: int,
-            lock: Lock,
-        ):
-            """하나의 클러스터를 처리하여 요약 노드를 생성하고 새로운 부모 노드를 생성"""
-            # 클러스터 내 모든 노드의 텍스트를 하나로 합침
-            node_texts = get_text(cluster)
-
-            # 합쳐진 텍스트를 요약하여 부모 노드의 텍스트로 사용
-            summarized_text = self.summarize(text=node_texts)
-
-            # 요약이 불충분하면 해당 클러스터를 건너뜀
-            if is_unusable_summary(summarized_text):
-                logger.info(
-                    f"skipping cluster {node_index}: unusable summary "
-                    f"{summarized_text.strip()[:40]!r}"
-                )
-                return
-
-            logger.info(
-                f"summarized text for node {node_index}: {summarized_text}"
-            )
-
-            token_count = count_tokens(summarized_text)
-            chunk_metadata = ChunkMetadata(
-                chunked_by=ChunkingMethod.SUMMARY, token_count=token_count
-            )
-            summary_node = TextNode(
-                text=summarized_text,
-                metadata={
-                    **chunk_metadata.to_dict(),
-                    SOURCE_SET_KEY: _covered_sources(cluster),
-                },
-            )
-
-            # 요약된 텍스트와 자식 노드 인덱스를 사용해 새로운 부모 노드 생성
-            _, new_parent_node = self.create_node(
-                node_index,
-                summary_node,
-                {node.index for node in cluster},
-            )
-
-            with lock:
-                new_level_nodes[node_index] = new_parent_node
-
-        # 설정된 레이어 수만큼 아래에서 위로 반복하여 트리를 구축
         for layer in range(self.num_layers):
-            new_level_nodes: dict[int, Node] = {}
-            logger.info(f"constructing layer {layer}")
-
-            node_list_current_layer = get_node_list(current_level_nodes)
-
-            if self._too_few_to_cluster(node_list_current_layer):
+            nodes = get_node_list(current_level_nodes)
+            if self._too_few_to_cluster(nodes):
                 logger.info(
-                    f"stopping at layer {layer} due to insufficient nodes for clustering"
+                    f"stopping at layer {layer}: {len(nodes)} nodes are too "
+                    "few to cluster"
                 )
                 break
 
-            # 현재 레이어의 노드들을 클러스터링
-            clustering_instance = self.clustering_algorithm(
-                reduction_dimension=self.reduction_dimension,
-                **self.clustering_params,
-            )
-            clusters = clustering_instance.perform_clustering(
-                node_list_current_layer,
-                self.cluster_embedding_model,
+            target = layer + 1
+            clusters = self._cluster(nodes)
+            logger.info(
+                f"layer {target}: summarizing {len(clusters)} clusters "
+                f"from {len(nodes)} nodes"
             )
 
-            lock = Lock()
-            layer_start_index = next_node_index
-
-            if use_multithreading:
-                max_workers = min(
-                    self.summarization_max_workers, len(clusters)
+            summaries = self._summarize_clusters(
+                clusters, target, use_multithreading
+            )
+            if not summaries:
+                logger.warning(
+                    f"layer {target}: no usable summaries, stopping here"
                 )
+                break
 
-                try:
-                    with ThreadPoolExecutor(
-                        max_workers=max_workers
-                    ) as executor:
-                        # 모든 작업을 한 번에 제출
-                        futures = []
-                        cluster_args = []
+            new_level_nodes = self.create_nodes(
+                next_node_index,
+                [
+                    self._summary_text_node(cluster, text)
+                    for cluster, text in summaries
+                ],
+                children=[
+                    {node.index for node in cluster}
+                    for cluster, _ in summaries
+                ],
+                label=f"layer {target} summaries",
+            )
+            next_node_index += len(new_level_nodes)
 
-                        for cluster in clusters:
-                            args = (
-                                cluster,
-                                new_level_nodes,
-                                next_node_index,
-                                lock,
-                            )
-                            cluster_args.append(args)
-                            futures.append(
-                                executor.submit(process_cluster, *args)
-                            )
-                            next_node_index += 1
-
-                        # 모든 작업 완료까지 안전하게 대기
-                        completed_count = 0
-                        for future in concurrent.futures.as_completed(
-                            futures, timeout=600
-                        ):
-                            try:
-                                future.result(
-                                    timeout=300
-                                )  # 개별 작업 5분 타임아웃
-                                completed_count += 1
-                            except concurrent.futures.TimeoutError:
-                                logger.error("cluster processing timed out")
-                            except Exception as e:
-                                logger.error(f"cluster processing failed: {e}")
-
-                        logger.info(
-                            f"successfully processed {completed_count}/{len(futures)} clusters"
-                        )
-
-                except Exception as e:
-                    logger.error(
-                        f"critical error in multithreaded cluster processing: {e}"
-                    )
-                    logger.info(
-                        "falling back to single-threaded cluster processing"
-                    )
-                    new_level_nodes.clear()
-                    next_node_index = layer_start_index
-                    for cluster in clusters:
-                        try:
-                            process_cluster(
-                                cluster,
-                                new_level_nodes,
-                                next_node_index,
-                                lock,
-                            )
-                            next_node_index += 1
-                        except Exception as cluster_error:
-                            logger.error(
-                                f"failed to process cluster in fallback mode: {cluster_error}"
-                            )
-
-            else:
-                for cluster in clusters:
-                    process_cluster(
-                        cluster,
-                        new_level_nodes,
-                        next_node_index,
-                        lock,
-                    )
-                    next_node_index += 1
-
-            layer_to_nodes[layer + 1] = list(new_level_nodes.values())
-            current_level_nodes = new_level_nodes
+            layer_to_nodes[target] = list(new_level_nodes.values())
             all_tree_nodes.update(new_level_nodes)
+            current_level_nodes = new_level_nodes
+            logger.info(
+                f"layer {target}: built {len(new_level_nodes)} summary nodes"
+            )
+
             if on_layer_built:
-                on_layer_built(layer + 1, layer_to_nodes[layer + 1])
+                on_layer_built(target, layer_to_nodes[target])
 
         return current_level_nodes
+
+    def _cluster(self, nodes: list[Node]) -> list[Cluster]:
+        clustering = self.clustering_algorithm(
+            reduction_dimension=self.reduction_dimension,
+            **self.clustering_params,
+        )
+        return clustering.perform_clustering(
+            nodes, self.cluster_embedding_model
+        )
+
+    def _summarize_clusters(
+        self,
+        clusters: Sequence[Cluster],
+        layer: int,
+        parallel: bool,
+    ) -> list[tuple[Cluster, str]]:
+        """클러스터를 요약하고 쓸 만한 것만 돌려준다.
+
+        예전에는 레이어 전체에 10분 제한을 걸고, 넘기면 성공한 요약까지 버린
+        채 처음부터 단일 스레드로 다시 돌렸다. 레이어 하나가 수십 분 걸리는
+        볼트에선 매번 두 배 일을 하는 셈이었다. 이제 전체 제한은 없고(호출별
+        제한은 LLM 클라이언트가 가진다), 실패한 클러스터만 한 번 더 시도한다.
+        """
+        total = len(clusters)
+        results: dict[int, str] = {}
+        failed: list[int] = []
+        progress = _ProgressReporter(f"layer {layer}", total)
+
+        def run(i: int) -> str:
+            return self.summarize(get_text(clusters[i]))
+
+        workers = min(self.summarization_max_workers, total)
+        if parallel and workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(run, i): i for i in range(total)}
+                for future in concurrent.futures.as_completed(futures):
+                    i = futures[future]
+                    try:
+                        results[i] = future.result()
+                    except Exception as e:
+                        logger.error(f"layer {layer}: cluster {i} failed: {e}")
+                        failed.append(i)
+                    progress.step()
+        else:
+            for i in range(total):
+                try:
+                    results[i] = run(i)
+                except Exception as e:
+                    logger.error(f"layer {layer}: cluster {i} failed: {e}")
+                    failed.append(i)
+                progress.step()
+
+        for i in failed:
+            try:
+                results[i] = run(i)
+            except Exception as e:
+                logger.error(
+                    f"layer {layer}: cluster {i} failed again, dropping it: {e}"
+                )
+
+        usable: list[tuple[Cluster, str]] = []
+        skipped = 0
+        for i, cluster in enumerate(clusters):
+            text = results.get(i)
+            if text is None or is_unusable_summary(text):
+                skipped += 1
+                logger.info(
+                    f"layer {layer}: skipping cluster {i}: unusable summary "
+                    f"{(text or '').strip()[:40]!r}"
+                )
+                continue
+            logger.debug(f"layer {layer}: cluster {i} summary: {text}")
+            usable.append((cluster, text))
+
+        if skipped:
+            logger.info(
+                f"layer {layer}: {skipped}/{total} clusters had no usable "
+                "summary"
+            )
+        return usable
+
+    @staticmethod
+    def _summary_text_node(cluster: Cluster, text: str) -> TextNode:
+        metadata = ChunkMetadata(
+            chunked_by=ChunkingMethod.SUMMARY, token_count=count_tokens(text)
+        )
+        return TextNode(
+            text=text,
+            metadata={
+                **metadata.to_dict(),
+                SOURCE_SET_KEY: _covered_sources(cluster),
+            },
+        )
