@@ -1,6 +1,9 @@
 import argparse
 import logging
 import os
+import uuid
+from collections.abc import Mapping
+from datetime import timedelta
 from pathlib import Path
 
 from raptor_qdrant.core.config import settings
@@ -9,6 +12,8 @@ from raptor_qdrant.database.qdrant_manager import QdrantManager
 from raptor_qdrant.rag.engine import EngineConfig, QueryResult, RaptorEngine
 from raptor_qdrant.rag.llm import BaseChatbotModel, create_chatbot
 from raptor_qdrant.vault import (
+    BuildLock,
+    DeferredChanges,
     VaultLoader,
     VaultNote,
     changed_note_paths,
@@ -135,18 +140,86 @@ def print_result(result: QueryResult, chunk_preview: int) -> None:
             )
 
 
-def run_index(engine: RaptorEngine, args: argparse.Namespace) -> int:
-    _, notes = load_vault(args.vault)
-    indexed = engine.add_corpus(
-        as_documents(notes),
-        note_hashes=as_hashes(notes),
-    )
-    logger.info(f"indexed {len(notes)} notes into {indexed} nodes")
+def build_lock(collection: str) -> BuildLock:
+    return BuildLock.for_collection(collection, settings.STATE_DIR)
+
+
+def refuse_if_building(lock: BuildLock, collection: str) -> bool:
+    """재구축이 돌고 있으면 알리고 True 를 돌려준다."""
+    info = lock.read()
+    if info and info.is_live:
+        logger.error(
+            f"index is already running for '{collection}' "
+            f"(pid {info.pid}, {format_elapsed(info.elapsed)} elapsed). "
+            "wait for it to finish"
+        )
+        return True
+    return False
+
+
+def format_elapsed(elapsed: timedelta) -> str:
+    return str(elapsed).split(".")[0]
+
+
+def rebuild(
+    engine: RaptorEngine, loader: VaultLoader, notes: list[VaultNote]
+) -> int:
+    """볼트 전체로 트리를 새로 세운다. 락을 잡고, 끝나면 그 사이 변경을 따라잡는다."""
+    lock = build_lock(engine.collection_name)
+    if refuse_if_building(lock, engine.collection_name):
+        return 1
+
+    stale = lock.stale()
+    if stale:
+        dropped = engine.discard_generation(stale.generation)
+        logger.warning(
+            f"previous index (pid {stale.pid}) did not finish. dropped "
+            f"{dropped} points of generation {stale.generation[:8]}"
+        )
+
+    snapshot = as_hashes(notes)
+    generation = uuid.uuid4().hex
+    with lock.hold(engine.collection_name, generation):
+        indexed = engine.add_corpus(
+            as_documents(notes), note_hashes=snapshot, generation=generation
+        )
+        logger.info(f"indexed {len(notes)} notes into {indexed} nodes")
+        catch_up(engine, loader, snapshot)
     return 0
 
 
+def catch_up(
+    engine: RaptorEngine, loader: VaultLoader, snapshot: Mapping[str, str]
+) -> None:
+    """빌드 동안 바뀐 노트를 잎만 갱신해 따라잡는다.
+
+    index 는 시작 시점의 스냅샷으로 트리를 세운다. 몇 시간 도는 사이 사용자가
+    고친 노트는 트리에 없고, 세대 정리 때 watch 가 넣어둔 잎도 함께 지워졌다.
+    끝난 뒤 스냅샷과 지금 볼트를 비교해 그 차이만 잎으로 넣는다.
+    """
+    diff = diff_vault(loader.load(), snapshot)
+    if not diff.has_changes:
+        logger.info("no notes changed while the tree was being built")
+        return
+
+    logger.info(
+        f"catching up on notes changed during the build: {diff.summary}"
+    )
+    apply_leaf_changes(engine, diff.added + diff.changed, diff.removed)
+
+
+def run_index(engine: RaptorEngine, args: argparse.Namespace) -> int:
+    loader, notes = load_vault(args.vault)
+    return rebuild(engine, loader, notes)
+
+
 def run_sync(engine: RaptorEngine, args: argparse.Namespace) -> int:
-    _, notes = load_vault(args.vault)
+    loader, notes = load_vault(args.vault)
+    if refuse_if_building(
+        build_lock(engine.collection_name), engine.collection_name
+    ):
+        return 1
+
     diff = diff_vault(notes, engine.indexed_content_hashes())
     logger.info(f"vault diff: {diff.summary}")
 
@@ -165,14 +238,7 @@ def run_sync(engine: RaptorEngine, args: argparse.Namespace) -> int:
         return 0
 
     if args.rebuild_tree:
-        indexed = engine.add_corpus(
-            as_documents(notes),
-            note_hashes=as_hashes(notes),
-        )
-        logger.info(
-            f"rebuilt the tree: {len(notes)} notes into {indexed} nodes"
-        )
-        return 0
+        return rebuild(engine, loader, notes)
 
     apply_leaf_changes(engine, diff.added + diff.changed, diff.removed)
     report_drift(engine)
@@ -204,28 +270,53 @@ def report_drift(engine: RaptorEngine) -> None:
         )
 
 
+def apply_paths(
+    engine: RaptorEngine, loader: VaultLoader, paths: set[Path]
+) -> None:
+    relative = changed_note_paths(paths, loader.vault_path)
+    if not relative:
+        return
+
+    alive = {
+        note.path: note
+        for note in (
+            loader.load_note(loader.vault_path / name)
+            for name in relative
+            if (loader.vault_path / name).is_file()
+        )
+        if not note.is_empty
+    }
+    gone = tuple(sorted(relative - alive.keys()))
+
+    apply_leaf_changes(engine, tuple(alive.values()), gone)
+
+
 def run_watch(engine: RaptorEngine, args: argparse.Namespace) -> int:
     loader, _ = load_vault(args.vault)
+    lock = build_lock(engine.collection_name)
+    held = DeferredChanges()
 
     def apply(paths: set[Path]) -> None:
-        relative = changed_note_paths(paths, loader.vault_path)
-        if not relative:
-            return
-
-        alive = {
-            note.path: note
-            for note in (
-                loader.load_note(loader.vault_path / name)
-                for name in relative
-                if (loader.vault_path / name).is_file()
+        # 재구축 중에 잎을 넣으면 서로 느려지고 세대 정리 때 지워진다.
+        # 모아뒀다가 끝난 뒤 tick 에서 적용한다.
+        if lock.is_held():
+            count = held.add(paths)
+            logger.info(
+                f"index is running, holding {count} changed note(s) until it "
+                "finishes"
             )
-            if not note.is_empty
-        }
-        gone = tuple(sorted(relative - alive.keys()))
+            return
+        apply_paths(engine, loader, paths)
 
-        apply_leaf_changes(engine, tuple(alive.values()), gone)
+    def tick() -> None:
+        if len(held) and not lock.is_held():
+            paths = held.drain()
+            logger.info(f"index finished, applying {len(paths)} held note(s)")
+            apply_paths(engine, loader, paths)
 
-    watch_vault(loader.vault_path, apply, debounce_seconds=args.debounce)
+    watch_vault(
+        loader.vault_path, apply, debounce_seconds=args.debounce, tick=tick
+    )
     return 0
 
 
@@ -247,6 +338,20 @@ def run_status(engine: RaptorEngine, _: argparse.Namespace) -> int:
     )
     if health.needs_rebuild:
         print("  요약 레이어가 낡았다. sync --rebuild-tree 를 권한다")
+    if health.has_mixed_generations:
+        print(f"  트리 세대가 {health.generations}개 섞여 있다")
+
+    info = build_lock(engine.collection_name).read()
+    if info and info.is_live:
+        print(
+            f"빌드 중: pid {info.pid}, {format_elapsed(info.elapsed)} 경과 "
+            f"(세대 {info.generation[:8]})"
+        )
+    elif info:
+        print(
+            f"  끝나지 않은 빌드 흔적: pid {info.pid}, 세대 "
+            f"{info.generation[:8]}. 다음 index 가 정리한다"
+        )
     for name in documents[:20]:
         print(f"  {name}")
     if len(documents) > 20:

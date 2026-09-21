@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     VAULT_PATH: str = "~/Documents/Obsidian Vault"
     COLLECTION_NAME: str = "obsidian"
+    # 빌드 락 같은 실행 상태를 두는 곳
+    STATE_DIR: str = "~/.local/state/raptor-qdrant"
 
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333

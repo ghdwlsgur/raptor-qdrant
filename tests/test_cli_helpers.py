@@ -3,11 +3,13 @@ import pytest
 from raptor_qdrant.cli import (
     as_documents,
     as_hashes,
+    catch_up,
+    format_elapsed,
     guard_remote_llm,
     load_vault,
 )
 from raptor_qdrant.rag.engine import QueryResult
-from raptor_qdrant.vault.loader import VaultNote
+from raptor_qdrant.vault.loader import VaultLoader, VaultNote
 
 
 def note(path: str) -> VaultNote:
@@ -72,3 +74,53 @@ def test_query_result_dedupes_sources_in_order():
 
 def test_query_result_without_sources():
     assert QueryResult("q", "a", "c").sources == []
+
+
+class FakeEngine:
+    def __init__(self) -> None:
+        self.upserted: dict[str, str] = {}
+        self.removed: list[str] = []
+
+    def upsert_notes(self, documents, note_hashes=None) -> int:
+        self.upserted.update(documents)
+        return len(documents)
+
+    def remove_notes(self, paths) -> int:
+        self.removed.extend(paths)
+        return len(self.removed)
+
+
+def test_catch_up_applies_only_what_changed_during_the_build(tmp_path):
+    (tmp_path / "a.md").write_text("처음 내용")
+    (tmp_path / "b.md").write_text("그대로인 내용")
+    (tmp_path / "gone.md").write_text("지워질 내용")
+    loader = VaultLoader(tmp_path)
+    snapshot = as_hashes(loader.load())
+
+    (tmp_path / "a.md").write_text("빌드 중 바뀐 내용")
+    (tmp_path / "c.md").write_text("빌드 중 생긴 노트")
+    (tmp_path / "gone.md").unlink()
+    engine = FakeEngine()
+
+    catch_up(engine, loader, snapshot)
+
+    assert set(engine.upserted) == {"a.md", "c.md"}
+    assert engine.removed == ["gone.md"]
+
+
+def test_catch_up_does_nothing_when_the_vault_is_unchanged(tmp_path):
+    (tmp_path / "a.md").write_text("내용")
+    loader = VaultLoader(tmp_path)
+    engine = FakeEngine()
+
+    catch_up(engine, loader, as_hashes(loader.load()))
+
+    assert not engine.upserted and not engine.removed
+
+
+def test_elapsed_is_shown_without_microseconds():
+    from datetime import timedelta
+
+    assert format_elapsed(timedelta(hours=2, minutes=3, seconds=4.5)) == (
+        "2:03:04"
+    )

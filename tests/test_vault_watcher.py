@@ -107,3 +107,40 @@ def test_paths_outside_the_vault_are_dropped(tmp_path):
         changed_note_paths([Path("/elsewhere/a.md")], tmp_path.resolve())
         == set()
     )
+
+
+def test_deferred_changes_collect_until_drained():
+    from raptor_qdrant.vault.watcher import DeferredChanges
+
+    held = DeferredChanges()
+
+    assert held.add([Path("/v/a.md"), Path("/v/b.md")]) == 2
+    assert held.add([Path("/v/a.md")]) == 2
+    assert len(held) == 2
+
+    assert held.drain() == {Path("/v/a.md"), Path("/v/b.md")}
+    assert len(held) == 0
+    assert held.drain() == set()
+
+
+def test_tick_runs_periodically_while_watching(tmp_path):
+    from raptor_qdrant.vault.watcher import watch_vault
+
+    stop = threading.Event()
+    ticks: list[int] = []
+
+    def tick() -> None:
+        ticks.append(1)
+        if len(ticks) >= 3:
+            stop.set()
+
+    watch_vault(
+        tmp_path,
+        lambda paths: None,
+        debounce_seconds=0.05,
+        stop=stop,
+        tick=tick,
+        tick_seconds=0.02,
+    )
+
+    assert len(ticks) >= 3
