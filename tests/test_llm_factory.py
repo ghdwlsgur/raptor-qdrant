@@ -42,3 +42,13 @@ def test_model_tag_is_normalised_for_health_check():
     assert (
         Ollama(model="qwen2.5:7b")._fully_qualified_model_tag() == "qwen2.5:7b"
     )
+
+
+def test_ollama_accepts_a_model_override():
+    from raptor_qdrant.core.config import settings
+
+    llm = create_chatbot("ollama", model="qwen2.5:3b")
+
+    assert isinstance(llm, Ollama)
+    assert llm.model == "qwen2.5:3b"
+    assert create_chatbot("ollama").model == settings.OLLAMA_MODEL

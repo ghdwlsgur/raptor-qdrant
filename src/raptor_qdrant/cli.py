@@ -11,6 +11,7 @@ from raptor_qdrant.core.logger import configure_logging
 from raptor_qdrant.database.qdrant_manager import QdrantManager
 from raptor_qdrant.rag.engine import EngineConfig, QueryResult, RaptorEngine
 from raptor_qdrant.rag.llm import BaseChatbotModel, create_chatbot
+from raptor_qdrant.rag.summarizer import LLMSummarizer
 from raptor_qdrant.vault import (
     BuildLock,
     DeferredChanges,
@@ -82,13 +83,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ready_chatbot(provider: str | None) -> BaseChatbotModel:
-    llm = create_chatbot(provider)
+def ready_chatbot(
+    provider: str | None, model: str | None = None
+) -> BaseChatbotModel:
+    llm = create_chatbot(provider, model)
     health_check = getattr(llm, "health_check", None)
     if health_check:
         health_check()
     logger.info(f"llm ready: {llm.describe}")
     return llm
+
+
+def summary_model_override(provider: str | None) -> str | None:
+    """요약에 답변 모델과 다른 Ollama 모델을 쓰기로 했으면 그 이름."""
+    name = (provider or settings.LLM_PROVIDER).strip().lower()
+    wanted = settings.OLLAMA_SUMMARY_MODEL.strip()
+    if name == "ollama" and wanted and wanted != settings.OLLAMA_MODEL:
+        return wanted
+    return None
+
+
+def ready_summarizer(
+    provider: str | None, llm: BaseChatbotModel
+) -> LLMSummarizer:
+    """요약기를 준비한다. 전용 모델이 지정돼 있으면 그것도 health check 한다."""
+    override = summary_model_override(provider)
+    if override:
+        return LLMSummarizer(ready_chatbot(provider, override))
+    return LLMSummarizer(llm)
 
 
 def guard_remote_llm(provider: str | None, allowed: bool) -> bool:
@@ -389,12 +411,17 @@ def main() -> int:
 
     try:
         llm = ready_chatbot(args.llm)
+        summarizer = ready_summarizer(args.llm, llm)
     except Exception as e:
         logger.error(f"LLM is not usable: {e}")
         return 1
 
     engine = RaptorEngine(
-        EngineConfig(collection_name=args.collection, llm=llm)
+        EngineConfig(
+            collection_name=args.collection,
+            llm=llm,
+            summarization_model=summarizer,
+        )
     )
 
     try:

@@ -1,5 +1,6 @@
 import logging
 import sys
+from pathlib import Path
 
 from loguru import logger
 
@@ -85,4 +86,43 @@ def configure_logging():
             filter=kst_formatter,
         )
 
-    logger.info(f"logging system is configured successfully: {environment}")
+    log_file = add_file_sink(log_level)
+
+    logger.info(
+        f"logging system is configured successfully: {environment}"
+        + (f", log file {log_file}" if log_file else "")
+    )
+
+
+def add_file_sink(log_level: str) -> Path | None:
+    """LOG_FILE 이 있으면 파일 sink 를 단다. 못 만들면 stdout 만으로 간다.
+
+    몇 시간 도는 인덱싱의 진행을 다른 터미널에서 tail 로 보려면 파일이
+    필요하다. 색 없이 평문으로 쓰고 10MB 마다 돌려 5개까지 둔다.
+    """
+    target = settings.LOG_FILE.strip()
+    if not target:
+        return None
+
+    path = Path(target).expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            str(path),
+            level=log_level,
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
+                "{name}:{function}:{line} - {message}"
+            ),
+            rotation="10 MB",
+            retention=5,
+            encoding="utf-8",
+            enqueue=True,
+            backtrace=False,
+            diagnose=False,
+            filter=kst_formatter,
+        )
+    except OSError as e:
+        logger.warning(f"cannot write log file {path}: {e}")
+        return None
+    return path

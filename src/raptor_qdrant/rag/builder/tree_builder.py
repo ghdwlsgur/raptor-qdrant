@@ -49,6 +49,7 @@ class TreeBuilderConfig:
         self.num_layers = num_layers
         self.summarization_max_workers = (
             summarization_max_workers
+            or settings.SUMMARY_WORKERS
             or SUMMARIZATION_MAX_WORKERS.get(
                 settings.LLM_PROVIDER, DEFAULT_SUMMARIZATION_MAX_WORKERS
             )

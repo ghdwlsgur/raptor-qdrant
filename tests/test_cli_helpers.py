@@ -7,6 +7,7 @@ from raptor_qdrant.cli import (
     format_elapsed,
     guard_remote_llm,
     load_vault,
+    summary_model_override,
 )
 from raptor_qdrant.rag.engine import QueryResult
 from raptor_qdrant.vault.loader import VaultLoader, VaultNote
@@ -124,3 +125,24 @@ def test_elapsed_is_shown_without_microseconds():
     assert format_elapsed(timedelta(hours=2, minutes=3, seconds=4.5)) == (
         "2:03:04"
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "answer_model", "summary_model", "expected"),
+    [
+        ("ollama", "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:3b"),
+        ("ollama", "qwen2.5:7b", "qwen2.5:7b", None),
+        ("ollama", "qwen2.5:7b", "", None),
+        ("ollama", "qwen2.5:7b", "   ", None),
+        ("bedrock", "qwen2.5:7b", "qwen2.5:3b", None),
+    ],
+)
+def test_summary_model_override(
+    monkeypatch, provider, answer_model, summary_model, expected
+):
+    from raptor_qdrant.core.config import settings
+
+    monkeypatch.setattr(settings, "OLLAMA_MODEL", answer_model)
+    monkeypatch.setattr(settings, "OLLAMA_SUMMARY_MODEL", summary_model)
+
+    assert summary_model_override(provider) == expected
