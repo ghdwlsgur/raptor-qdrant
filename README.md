@@ -37,8 +37,8 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
 하이브리드 검색으로 상위 5개 노드를 가져오고(`alpha=0.8`, 벡터 8 대 키워드 2), 컨텍스트 예산 4096토큰이 찰 때까지 이어붙여 Bedrock에 넘긴다. 레이어 구분 없이 전부 후보에 넣는 것이 기본값이다.
 
 ```python
-from src.database.qdrant_manager import QdrantManager
-from src.rag.engine import EngineConfig, RaptorEngine
+from raptor_qdrant.database.qdrant_manager import QdrantManager
+from raptor_qdrant import EngineConfig, RaptorEngine
 
 QdrantManager().connect()
 engine = RaptorEngine(EngineConfig(collection_name="my-docs"))
@@ -58,10 +58,10 @@ for chunk in result.chunks:
 **1. Qdrant 띄우기**
 
 ```bash
-docker run -p 6333:6333 -v "$(pwd)/qdrant_storage:/qdrant/storage" qdrant/qdrant
+docker compose up -d qdrant
 ```
 
-**2. 의존성 설치** — Python 3.12가 필요하다.
+**2. 의존성 설치.** Python 3.12가 필요하다.
 
 ```bash
 uv sync
@@ -83,9 +83,17 @@ Bedrock으로 돌리려면 `--llm bedrock`을 주거나 `LLM_PROVIDER=bedrock`�
 **4. 실행**
 
 ```bash
-uv run main.py                                   # 기본 문서 인덱싱 + 예시 질문
-uv run main.py --file data/sample_en.txt         # 다른 문서
-uv run main.py --skip-index --question "질문은?"  # 이미 적재된 컬렉션에 질의만
+uv run raptor-qdrant                                   # 기본 문서 인덱싱 + 예시 질문
+uv run raptor-qdrant --file data/sample_en.txt         # 다른 문서
+uv run raptor-qdrant --skip-index --question "질문은?"  # 이미 적재된 컬렉션에 질의만
+```
+
+Docker 로 통째로 띄우려면 compose 를 쓴다. Qdrant 가 함께 올라오고, Ollama 는
+호스트에서 돌고 있는 것을 쓴다. macOS 에서 컨테이너 안의 Ollama 는 Metal 을
+못 쓰기 때문이다.
+
+```bash
+docker compose run --rm app --file data/sample_ko.txt
 ```
 
 | 옵션 | 설명 |
@@ -122,21 +130,28 @@ uv run main.py --skip-index --question "질문은?"  # 이미 적재된 컬렉�
 `collection_name`은 도메인이나 카테고리 단위, `document_name`은 그 안의 개별 문서 단위다. 한 컬렉션에 여러 문서를 담는 것이 기본 사용 방식이라, `add_document()`는 컬렉션을 지우지 않는다.
 
 ```python
-engine.list_documents()                    # 이 컬렉션의 문서명 목록
-engine.update_document(text, "report")     # 기존 문서 교체
-engine.delete_document("report")           # 문서 단위 삭제
-engine.add_document(text, "report", recreate_collection=True)  # 컬렉션 통째로 비우고 적재
+engine.list_documents()  # 이 컬렉션의 문서명 목록
+engine.update_document(text, "report")  # 기존 문서 교체
+engine.delete_document("report")  # 문서 단위 삭제
+engine.add_document(
+    text, "report", recreate_collection=True
+)  # 컬렉션 통째로 비우고 적재
 ```
 
 같은 `document_name`으로 두 번 `add_document()`를 부르면 중복 적재 대신 예외가 난다. 교체할 생각이었다면 `update_document()`를 쓰라는 뜻이다.
 
-## 테스트
+## 개발
 
-의존성 설치 후 바로 돌아간다. Qdrant나 LLM 없이 순수 로직만 검증한다.
+품질 검사는 CI 가 도는 것과 같다. 테스트는 Qdrant 나 LLM 없이 순수 로직만 본다.
 
 ```bash
-uv run pytest tests -q
+uv run pytest              # 테스트
+uv run ruff check .        # 린트
+uv run ruff format .       # 포맷
+uv run mypy                # 타입 검사
 ```
+
+테스트가 지키는 것은 이렇다.
 
 | 파일 | 무엇을 지키는가 |
 |---|---|
@@ -152,15 +167,15 @@ uv run pytest tests -q
 ## 구조
 
 ```
-main.py                        CLI 진입점
-src/
+src/raptor_qdrant/
+├── cli.py                     콘솔 스크립트 진입점
 ├── core/
 │   ├── config.py              pydantic-settings 기반 환경 설정
 │   └── logger.py              표준 logging을 loguru로 넘기고 KST로 출력
 ├── database/
 │   └── qdrant_manager.py      연결(싱글톤), 컬렉션·포인트 운영
 └── rag/
-    ├── engine.py              RaptorEngine — 이 패키지의 정문
+    ├── engine.py              RaptorEngine, 이 패키지의 정문
     ├── embedding.py           KURE-v1 임베딩
     ├── chunker/               마크다운 + 의미 기반 하이브리드 청킹
     ├── builder/               RAPTOR 트리 구축
@@ -190,5 +205,9 @@ tests/                         Qdrant·LLM 없이 도는 단위 테스트
 ## 참고
 
 - [RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval](https://arxiv.org/abs/2401.18059)
-- [KURE-v1](https://huggingface.co/nlpai-lab/KURE-v1) — 한국어 검색 특화 임베딩 모델
+- [KURE-v1](https://huggingface.co/nlpai-lab/KURE-v1): 한국어 검색 특화 임베딩 모델
 - [Understanding UMAP](https://pair-code.github.io/understanding-umap/)
+
+## 라이선스
+
+MIT. [LICENSE](LICENSE) 참고.
