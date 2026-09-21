@@ -7,6 +7,7 @@ from llama_index.core.schema import TextNode
 
 from raptor_qdrant.rag.builder.models.structure import Node
 from raptor_qdrant.rag.builder.tree_builder import (
+    LayerCallback,
     TreeBuilder,
     TreeBuilderConfig,
 )
@@ -91,6 +92,7 @@ class ClusterTreeBuilder(TreeBuilder):
         all_tree_nodes: dict[int, Node],
         layer_to_nodes: dict[int, list[Node]],
         use_multithreading: bool = False,
+        on_layer_built: LayerCallback | None = None,
     ) -> dict[int, Node]:
         """TreeBuilder의 추상 메서드 구현
         리프 노드로부터 시작하여 클러스터링과 요약을 반복하며 상위 레이어의 노드를 생성
@@ -255,5 +257,7 @@ class ClusterTreeBuilder(TreeBuilder):
             layer_to_nodes[layer + 1] = list(new_level_nodes.values())
             current_level_nodes = new_level_nodes
             all_tree_nodes.update(new_level_nodes)
+            if on_layer_built:
+                on_layer_built(layer + 1, layer_to_nodes[layer + 1])
 
         return current_level_nodes

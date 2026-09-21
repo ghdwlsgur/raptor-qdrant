@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from sentence_transformers import SentenceTransformer
 
 from raptor_qdrant.core.config import settings
+from raptor_qdrant.rag.constants import EMBEDDING_BATCH_SIZE
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
@@ -17,6 +18,14 @@ class BaseEmbeddingModel(ABC):
     @abstractmethod
     def create_embedding(self, text: str) -> list[float]:
         """텍스트를 임베딩 벡터로 변환"""
+
+    def create_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """여러 텍스트를 한 번에 임베딩한다.
+
+        기본 구현은 하나씩 돈다. 배치를 지원하는 모델은 이 메서드를 덮어써서
+        한 번의 호출로 처리하는 것이 훨씬 빠르다.
+        """
+        return [self.create_embedding(text) for text in texts]
 
     @property
     @abstractmethod
@@ -64,12 +73,24 @@ class KoreanEmbeddingModel(BaseEmbeddingModel):
 
     def create_embedding(self, text: str) -> list[float]:
         """텍스트를 임베딩 벡터로 변환한다. 빈 텍스트는 ValueError."""
-        if not text or not text.strip():
+        return self.create_embeddings([text])[0]
+
+    def create_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """텍스트 묶음을 배치로 임베딩한다.
+
+        하나씩 encode 를 부르면 호출마다 GPU 왕복이 생긴다. 리스트로 넘기면
+        모델이 알아서 배치로 묶어 처리한다.
+        """
+        if not texts:
+            return []
+        if any(not text or not text.strip() for text in texts):
             raise ValueError("cannot create an embedding for empty text")
 
         try:
-            embedding = self.model.encode(text)
-            return embedding.tolist()
+            embeddings = self.model.encode(
+                texts, batch_size=EMBEDDING_BATCH_SIZE, convert_to_numpy=True
+            )
+            return [vector.tolist() for vector in embeddings]
         except Exception as e:
-            logger.error(f"failed to create embedding: {e}")
+            logger.error(f"failed to create embeddings: {e}")
             raise RuntimeError(f"embedding creation failed: {e}") from e

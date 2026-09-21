@@ -1,18 +1,14 @@
-import concurrent.futures
-import copy
 import logging
-import os
 from abc import abstractmethod
-from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Mapping
 
 from llama_index.core.schema import TextNode
-from tqdm import tqdm
 
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.rag.chunker.hybrid_chunker import BaseChunker, HybridChunker
 from raptor_qdrant.rag.constants import (
     DEFAULT_SUMMARIZATION_MAX_WORKERS,
+    EMBEDDING_BATCH_SIZE,
     SOURCE_KEY,
     SUMMARIZATION_MAX_WORKERS,
 )
@@ -28,6 +24,10 @@ from raptor_qdrant.rag.summarizer import (
 from .models.structure import Node, Tree
 
 logger = logging.getLogger(__name__)
+
+# 레이어 하나가 완성될 때마다 (레이어 번호, 그 레이어의 노드들) 로 불린다.
+# 잎은 레이어 0 이다. 적재를 레이어 단위로 미루지 않고 바로 하기 위한 훅이다.
+LayerCallback = Callable[[int, list[Node]], None]
 
 
 class TreeBuilderConfig:
@@ -118,106 +118,70 @@ class TreeBuilder:
         self.chunker = config.chunker
         self.summarization_max_workers = config.summarization_max_workers
 
+    def _main_embedding(self) -> tuple[str, BaseEmbeddingModel]:
+        name = next(iter(self.embedding_models))
+        return name, self.embedding_models[name]
+
+    def create_nodes(
+        self,
+        start_index: int,
+        llama_nodes: list[TextNode],
+        children: list[set[int]] | None = None,
+        label: str = "nodes",
+    ) -> dict[int, Node]:
+        """TextNode 묶음을 임베딩해 Node 로 만든다. 임베딩은 배치로 던진다.
+
+        노드 하나씩 encode 를 부르면 호출마다 GPU 왕복이 생기고, 그걸 스레드
+        열여섯 개가 동시에 하면 서로 경합만 한다. 리스트로 한 번에 넘기는
+        쪽이 훨씬 빠르다. 이미 임베딩이 붙어 있는 노드는 그대로 쓴다.
+        """
+        if children is not None and len(children) != len(llama_nodes):
+            raise ValueError("children must line up with llama_nodes")
+
+        model_name, model = self._main_embedding()
+        texts = [node.get_content() for node in llama_nodes]
+
+        vectors: dict[int, list[float]] = {
+            i: list(node.embedding)
+            for i, node in enumerate(llama_nodes)
+            if node.embedding is not None
+        }
+        pending = [i for i in range(len(llama_nodes)) if i not in vectors]
+
+        for start in range(0, len(pending), EMBEDDING_BATCH_SIZE):
+            batch = pending[start : start + EMBEDDING_BATCH_SIZE]
+            embedded = model.create_embeddings([texts[i] for i in batch])
+            vectors.update(zip(batch, embedded, strict=True))
+            logger.info(
+                f"embedded {start + len(batch)}/{len(pending)} {label}"
+            )
+
+        return {
+            start_index + i: Node(
+                text=texts[i],
+                index=start_index + i,
+                children=set(children[i]) if children else set(),
+                embeddings={model_name: vectors[i]},
+                metadata=dict(node.metadata) if node.metadata else {},
+            )
+            for i, node in enumerate(llama_nodes)
+        }
+
     def create_node(
         self,
         index: int,
         llama_node: TextNode,
         children_indices: set[int] | None = None,
     ) -> tuple[int, Node]:
-        """주어진 LlamaIndex TextNode로부터 커스텀 Node 객체 생성"""
-        if children_indices is None:
-            children_indices = set()
-
-        text = llama_node.get_content()
-        main_model_name = next(iter(self.embedding_models))
-
-        if llama_node.embedding is None:
-            embedding_model = self.embedding_models[main_model_name]
-            embedding = embedding_model.create_embedding(text)
-        else:
-            embedding = llama_node.embedding
-
-        embeddings_dict = {main_model_name: embedding}
-
-        # LlamaIndex TextNode의 메타데이터를 복사
-        metadata = dict(llama_node.metadata) if llama_node.metadata else {}
-
-        # (인덱스, 생성된 Node 객체) 튜플 반환
-        return (
-            index,
-            Node(
-                text=text,
-                index=index,
-                children=children_indices,
-                embeddings=embeddings_dict,
-                metadata=metadata,
-            ),
+        """노드 하나를 만든다. 여럿이면 create_nodes 가 배치로 처리한다."""
+        nodes = self.create_nodes(
+            index, [llama_node], [children_indices or set()]
         )
+        return index, nodes[index]
 
     def summarize(self, text) -> str:
         """주어진 컨텍스트(텍스트)를 요약"""
         return self.summarization_model.summarize(text)
-
-    def multithreaded_create_leaf_nodes(
-        self, nodes: list[TextNode]
-    ) -> dict[int, Node]:
-        """ThreadPoolExecutor를 사용하여 안전한 멀티스레딩으로 Leaf Node 생성"""
-        leaf_nodes: dict[int, Node] = {}
-
-        if not nodes:
-            logger.warning("No nodes provided for leaf node creation")
-            return leaf_nodes
-
-        # 적절한 스레드 수 계산 (CPU 코어 수의 2배, 최대 16개로 제한)
-        max_workers = min(len(nodes), max(1, (os.cpu_count() or 1) * 2), 16)
-
-        try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 모든 작업을 한 번에 제출
-                futures = [
-                    executor.submit(self.create_node, i, node)
-                    for i, node in enumerate(nodes)
-                ]
-
-                # 완료된 작업들을 안전하게 처리
-                completed_count = 0
-                with tqdm(
-                    total=len(futures), desc="Creating Leaf Nodes"
-                ) as pbar:
-                    for future in concurrent.futures.as_completed(
-                        futures, timeout=300
-                    ):
-                        try:
-                            index, created = future.result(timeout=60)
-                            leaf_nodes[index] = created
-                            completed_count += 1
-                        except concurrent.futures.TimeoutError:
-                            logger.error("task timed out")
-                        except Exception as e:
-                            logger.error(f"task failed: {e}")
-                        finally:
-                            pbar.update(1)
-
-                logger.info(
-                    f"successfully created {completed_count}/{len(nodes)} leaf nodes"
-                )
-
-        except Exception as e:
-            logger.error(f"Critical error in multithreaded node creation: {e}")
-            # 폴백: 싱글스레드로 처리
-            logger.info("Falling back to single-threaded node creation")
-            for i, node in enumerate(
-                tqdm(nodes, desc="Creating Leaf Nodes (Fallback)")
-            ):
-                try:
-                    index, created_node = self.create_node(i, node)
-                    leaf_nodes[index] = created_node
-                except Exception as node_error:
-                    logger.error(
-                        f"Failed to create node {i} in fallback mode: {node_error}"
-                    )
-
-        return leaf_nodes
 
     def _chunk_into_nodes(self, text: str) -> list[TextNode]:
         nodes = self.chunker.chunk(text)
@@ -236,6 +200,7 @@ class TreeBuilder:
         self,
         documents: Mapping[str, str],
         use_multithreading: bool = True,
+        on_layer_built: LayerCallback | None = None,
     ) -> Tree:
         """여러 문서의 청크 위에 트리 하나를 올린다.
 
@@ -246,7 +211,9 @@ class TreeBuilder:
             raise ValueError("documents must not be empty")
 
         return self._assemble(
-            self._chunk_documents(documents), use_multithreading
+            self._chunk_documents(documents),
+            use_multithreading,
+            on_layer_built,
         )
 
     def _chunk_documents(self, documents: Mapping[str, str]) -> list[TextNode]:
@@ -269,22 +236,17 @@ class TreeBuilder:
         )
         return nodes
 
-    def build_leaves_only(
-        self,
-        documents: Mapping[str, str],
-        use_multithreading: bool = True,
-    ) -> Tree:
+    def build_leaves_only(self, documents: Mapping[str, str]) -> Tree:
         """클러스터링과 요약 없이 잎 노드만 만든다.
 
         노트 하나를 고칠 때마다 트리를 다시 세울 수는 없다. 잎은 청킹과 로컬
         임베딩뿐이라 즉시 갱신할 수 있고, 트리 간선은 저장되지 않으므로 잎만
         갈아끼워도 적재된 요약 노드가 깨지지 않는다.
         """
-        nodes = self._chunk_documents(documents)
-        leaf_nodes = self._create_leaf_nodes(nodes, use_multithreading)
+        leaf_nodes = self._create_leaf_nodes(self._chunk_documents(documents))
 
         return Tree(
-            all_nodes=copy.deepcopy(leaf_nodes),
+            all_nodes=dict(leaf_nodes),
             root_nodes=leaf_nodes,
             leaf_nodes=leaf_nodes,
             num_layers=0,
@@ -292,48 +254,53 @@ class TreeBuilder:
         )
 
     def build_from_text(
-        self, text: str, use_multithreading: bool = True
+        self,
+        text: str,
+        use_multithreading: bool = True,
+        on_layer_built: LayerCallback | None = None,
     ) -> Tree:
         """전체 텍스트에서 최종 Tree 객체를 생성"""
         if not text or not text.strip():
             raise ValueError("cannot build a tree from empty text")
 
-        # chunker를 사용하여 텍스트를 여러 개의 TextNode로 분할
-        return self._assemble(self._chunk_into_nodes(text), use_multithreading)
+        return self._assemble(
+            self._chunk_into_nodes(text), use_multithreading, on_layer_built
+        )
 
-    def _create_leaf_nodes(
-        self, nodes: list[TextNode], use_multithreading: bool
-    ) -> dict[int, Node]:
-        if use_multithreading:
-            return self.multithreaded_create_leaf_nodes(nodes)
-        return {
-            i: self.create_node(i, node)[1]
-            for i, node in enumerate(tqdm(nodes, desc="Creating Leaf Nodes"))
-        }
+    def _create_leaf_nodes(self, nodes: list[TextNode]) -> dict[int, Node]:
+        logger.info(
+            f"embedding {len(nodes)} leaf chunks in batches of "
+            f"{EMBEDDING_BATCH_SIZE}"
+        )
+        return self.create_nodes(0, nodes, label="leaf chunks")
 
     def _assemble(
-        self, nodes: list[TextNode], use_multithreading: bool
+        self,
+        nodes: list[TextNode],
+        use_multithreading: bool,
+        on_layer_built: LayerCallback | None = None,
     ) -> Tree:
-        leaf_nodes = self._create_leaf_nodes(nodes, use_multithreading)
+        leaf_nodes = self._create_leaf_nodes(nodes)
 
-        # 모든 노드를 깊은 복사하여 all_nodes에 저장
-        all_nodes = copy.deepcopy(leaf_nodes)
-        # 각 계층별 노드 리스트를 저장할 딕셔너리
+        # 노드 객체는 만들어진 뒤 바뀌지 않으므로 딕셔너리만 따로 두면 된다.
+        # 깊은 복사는 임베딩까지 전부 두 벌로 만들어 메모리만 먹었다.
+        all_nodes = dict(leaf_nodes)
         layer_to_nodes = {0: list(leaf_nodes.values())}
         logger.info(f"created {len(leaf_nodes)} leaf nodes")
+
+        if on_layer_built:
+            on_layer_built(0, layer_to_nodes[0])
 
         # 상위 노드 생성 및 트리 구축
         # 하위 클래스(ClusterTreeBuilder)에서 구현된 construct_tree 메서드 호출
         root_nodes = self.construct_tree(
-            all_nodes, layer_to_nodes, use_multithreading
+            all_nodes, layer_to_nodes, use_multithreading, on_layer_built
         )
         final_depth = len(layer_to_nodes) - 1
 
-        # 최종 Tree 객체 생성
-        tree = Tree(
+        return Tree(
             all_nodes, root_nodes, leaf_nodes, final_depth, layer_to_nodes
         )
-        return tree
 
     @abstractmethod
     def construct_tree(
@@ -341,5 +308,6 @@ class TreeBuilder:
         all_tree_nodes: dict[int, Node],
         layer_to_nodes: dict[int, list[Node]],
         use_multithreading: bool = True,
+        on_layer_built: LayerCallback | None = None,
     ) -> dict[int, Node]:
         pass

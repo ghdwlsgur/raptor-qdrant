@@ -46,3 +46,7 @@ TREE_GENERATION_KEY = "tree_generation"
 
 # 요약 레이어가 이만큼 낡으면 재구축을 권한다
 TREE_DRIFT_WARN_RATIO = 0.2
+
+# ========================================= Embedding
+# 잎·요약 노드를 임베딩할 때 한 번에 encode 에 넘기는 텍스트 수
+EMBEDDING_BATCH_SIZE = 64
