@@ -28,7 +28,8 @@ def test_collects_nodes_until_the_budget_is_reached():
     )
 
     assert window.chunks == ["a", "b"]
-    assert window.total_tokens == 200
+    # 근거 머리표도 예산을 쓴다. 본문 200 토큰에 라벨 두 개가 더 붙는다
+    assert 200 < window.total_tokens <= 250
     assert window.skipped == [(2, 100)]
 
 
@@ -52,12 +53,26 @@ def test_reports_empty_when_nothing_fits():
     assert window.chunk_info == []
 
 
-def test_joins_chunks_with_a_blank_line():
+def test_each_chunk_carries_a_numbered_label():
     window = assemble_context(
-        [node("a", 1, 0), node("b", 1, 1)], max_tokens=100
+        [
+            node("a", 1, 0, document_name="메모/one.md"),
+            node("b", 1, 1, layer=2, source_notes=["x.md", "y.md"]),
+        ],
+        max_tokens=100,
     )
 
-    assert window.text == "a\n\nb"
+    blocks = window.text.split("\n\n")
+    assert blocks[0] == "[근거 1 | 원문 | 메모/one.md]\na"
+    assert blocks[1] == "[근거 2 | 요약 | 2개 노트 (x.md, y.md)]\nb"
+
+
+def test_the_same_text_is_not_sent_twice():
+    window = assemble_context(
+        [node("같은 본문", 10, 0), node("같은 본문", 10, 1)], max_tokens=500
+    )
+
+    assert window.chunks == ["같은 본문"]
 
 
 def test_counts_tokens_from_text_when_metadata_lacks_them():

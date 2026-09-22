@@ -1,3 +1,5 @@
+import argparse
+
 import pytest
 
 from raptor_qdrant.cli import (
@@ -7,6 +9,7 @@ from raptor_qdrant.cli import (
     format_elapsed,
     guard_remote_llm,
     load_vault,
+    needs_llm,
     summary_model_override,
 )
 from raptor_qdrant.rag.engine import QueryResult
@@ -30,6 +33,13 @@ def test_remote_provider_passes_with_consent():
 @pytest.mark.parametrize("provider", ["ollama", "OLLAMA"])
 def test_local_provider_needs_no_consent(provider):
     assert guard_remote_llm(provider, allowed=False)
+
+
+@pytest.mark.parametrize(
+    "provider", ["anthropic", "claude", "openai", "chatgpt", "GPT"]
+)
+def test_new_remote_providers_are_blocked_without_consent(provider):
+    assert not guard_remote_llm(provider, allowed=False)
 
 
 def test_guard_falls_back_to_the_configured_provider(monkeypatch):
@@ -128,21 +138,47 @@ def test_elapsed_is_shown_without_microseconds():
 
 
 @pytest.mark.parametrize(
-    ("provider", "answer_model", "summary_model", "expected"),
+    ("provider", "setting", "answer_model", "summary_model", "expected"),
     [
-        ("ollama", "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:3b"),
-        ("ollama", "qwen2.5:7b", "qwen2.5:7b", None),
-        ("ollama", "qwen2.5:7b", "", None),
-        ("ollama", "qwen2.5:7b", "   ", None),
-        ("bedrock", "qwen2.5:7b", "qwen2.5:3b", None),
+        ("ollama", "OLLAMA_MODEL", "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:3b"),
+        ("ollama", "OLLAMA_MODEL", "qwen2.5:7b", "qwen2.5:7b", None),
+        ("ollama", "OLLAMA_MODEL", "qwen2.5:7b", "", None),
+        ("ollama", "OLLAMA_MODEL", "qwen2.5:7b", "   ", None),
+        (
+            "claude",
+            "ANTHROPIC_MODEL",
+            "claude-opus-5",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5",
+        ),
+        ("chatgpt", "OPENAI_MODEL", "gpt-4.1", "gpt-4.1", None),
     ],
 )
 def test_summary_model_override(
-    monkeypatch, provider, answer_model, summary_model, expected
+    monkeypatch, provider, setting, answer_model, summary_model, expected
 ):
     from raptor_qdrant.core.config import settings
 
-    monkeypatch.setattr(settings, "OLLAMA_MODEL", answer_model)
-    monkeypatch.setattr(settings, "OLLAMA_SUMMARY_MODEL", summary_model)
+    monkeypatch.setattr(settings, setting, answer_model)
+    monkeypatch.setattr(settings, "SUMMARY_MODEL", summary_model)
 
     assert summary_model_override(provider) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "rebuild_tree", "expected"),
+    [
+        ("index", False, True),
+        ("ask", False, True),
+        ("sync", True, True),
+        ("sync", False, False),
+        ("watch", False, False),
+        ("status", False, False),
+    ],
+)
+def test_only_summarising_commands_need_an_llm(
+    command, rebuild_tree, expected
+):
+    args = argparse.Namespace(command=command, rebuild_tree=rebuild_tree)
+
+    assert needs_llm(args) is expected

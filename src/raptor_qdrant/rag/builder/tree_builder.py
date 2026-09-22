@@ -16,6 +16,7 @@ from raptor_qdrant.rag.embedding import (
     BaseEmbeddingModel,
     KoreanEmbeddingModel,
 )
+from raptor_qdrant.rag.llm import LazyChatbot, normalize_provider
 from raptor_qdrant.rag.summarizer import (
     BaseSummarizationModel,
     LLMSummarizer,
@@ -45,17 +46,22 @@ class TreeBuilderConfig:
         | None = None,  # 텍스트 청킹에 사용할 청킹 오브젝트
         summarization_max_workers: int
         | None = None,  # 클러스터 요약 동시 실행 수
+        provider: str | None = None,  # 요약을 돌릴 LLM 공급자
     ):
         self.num_layers = num_layers
+        # 동시 실행 수는 실제로 쓰는 공급자를 따라간다. --llm 으로 골라놓고
+        # 설정값의 공급자 기본치를 쓰면 원격 모델을 두 개씩만 굴리게 된다
         self.summarization_max_workers = (
             summarization_max_workers
             or settings.SUMMARY_WORKERS
             or SUMMARIZATION_MAX_WORKERS.get(
-                settings.LLM_PROVIDER, DEFAULT_SUMMARIZATION_MAX_WORKERS
+                normalize_provider(provider), DEFAULT_SUMMARIZATION_MAX_WORKERS
             )
         )
         self.summarization_length = summarization_length
-        self.summarization_model = summarization_model or LLMSummarizer()
+        self.summarization_model = summarization_model or LLMSummarizer(
+            LazyChatbot(provider)
+        )
         if not isinstance(self.summarization_model, BaseSummarizationModel):
             raise ValueError(
                 "summarization_model must be an instance of BaseSummarizationModel"

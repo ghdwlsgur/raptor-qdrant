@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 
-from raptor_qdrant.rag.llm import BaseChatbotModel, create_chatbot
+from raptor_qdrant.rag.llm import BaseChatbotModel, LazyChatbot
 from raptor_qdrant.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class BaseSummarizationModel(ABC):
 class LLMSummarizer(BaseSummarizationModel):
     def __init__(self, llm: BaseChatbotModel | None = None):
         try:
-            self.llm = llm or create_chatbot()
+            self.llm = llm or LazyChatbot()
         except Exception as e:
             raise ValueError(f"failed to initialize summarizer: {e}") from e
 
@@ -44,7 +44,7 @@ class LLMSummarizer(BaseSummarizationModel):
 
         try:
             prompt = load_prompt("prompt/summarizer.md").format(text=text)
-            return self.llm.answer(context="", question=prompt).strip()
+            return self.llm.complete(prompt).strip()
         except Exception as e:
             logger.error(f"error during summarization: {e}")
             return NO_SUMMARY

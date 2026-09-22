@@ -13,7 +13,6 @@ from raptor_qdrant.rag.constants import (
     OLLAMA_TIMEOUT_SECONDS,
 )
 from raptor_qdrant.rag.llm.base import BaseChatbotModel
-from raptor_qdrant.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +21,14 @@ logger = logging.getLogger(__name__)
 class Ollama(BaseChatbotModel):
     def __init__(
         self,
-        model: str = settings.OLLAMA_MODEL,
-        host: str = settings.OLLAMA_HOST,
+        model: str | None = None,
+        host: str | None = None,
         max_tokens: int = OLLAMA_MAX_TOKENS,
         temperature: float = OLLAMA_TEMPERATURE,
         timeout: int = OLLAMA_TIMEOUT_SECONDS,
     ):
-        self.model = model
-        self.host = host.rstrip("/")
+        self.model = model or settings.OLLAMA_MODEL
+        self.host = (host or settings.OLLAMA_HOST).rstrip("/")
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
@@ -69,22 +68,18 @@ class Ollama(BaseChatbotModel):
     def _fully_qualified_model_tag(self) -> str:
         return self.model if ":" in self.model else f"{self.model}:latest"
 
-    def _create_prompt(self, context: str, question: str) -> list:
-        prompt_template = load_prompt("prompt/chatbot.md")
-        formatted_prompt = prompt_template.format(
-            context=context, question=question
-        )
-        return [{"role": "user", "content": formatted_prompt}]
+    def _create_prompt(self, prompt: str) -> list:
+        return [{"role": "user", "content": prompt}]
 
     @retry(
         wait=wait_random_exponential(min=1, max=10),
         stop=stop_after_attempt(OLLAMA_MAX_RETRIES),
     )
-    def answer(self, context: str, question: str) -> str:
+    def complete(self, prompt: str) -> str:
         payload = json.dumps(
             {
                 "model": self.model,
-                "messages": self._create_prompt(context, question),
+                "messages": self._create_prompt(prompt),
                 "stream": False,
                 "options": {
                     "temperature": self.temperature,

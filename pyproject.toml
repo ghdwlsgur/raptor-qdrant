@@ -28,6 +28,8 @@ dependencies = [
     "torch>=2.8.0",
     "fastembed>=0.7.3",
     "watchdog>=6.0.0",
+    "anthropic>=1.7.0",
+    "openai>=1.107.0",
 ]
 
 [project.scripts]
