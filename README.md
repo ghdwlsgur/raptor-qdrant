@@ -23,7 +23,7 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
    │     마크다운 헤더로 1차 분할 → 512토큰 넘는 섹션만 의미 기반 2차 분할
    │
    ├─ 2. 잎 노드 생성 ............ src/raptor_qdrant/rag/builder/tree_builder.py
-   │     KURE-v1 임베딩을 64개 단위 배치로. 끝나는 즉시 Qdrant 에 적재
+   │     KURE-v1 임베딩을 64개 단위 배치로. 끝나는 즉시 Qdrant에 적재
    │
    ├─ 3. 트리 구축 (최대 5층) .... src/raptor_qdrant/rag/builder/cluster/
    │     UMAP 10차원 축소 → GMM 소프트 클러스터링 (전역 → 지역 2단계)
@@ -33,24 +33,28 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
    │     실패한 클러스터만 한 번 더 시도하고, 그래도 안 되면 그 클러스터만 뺀다
    │
    └─ 4. 세대 교체 ............... src/raptor_qdrant/rag/retriever/qdrant_retriever.py
-         모든 노드가 같은 tree_generation 을 달고 dense + sparse 하이브리드로 저장
+         모든 노드가 같은 tree_generation을 달고 dense + sparse 하이브리드로 저장
          트리가 완성되면 그 세대가 아닌 포인트(이전 트리)를 지운다
          payload: layer, node_index, document_name, source_notes, content_hash, tree_generation
 ```
 
 층이 올라갈수록 노드 수가 줄고 남은 노드가 11개 이하가 되면 거기서 멈춘다.
 
-진행은 로그로 본다. 잎 임베딩은 배치마다, 요약은 레이어별 10% 단위로 남기고, 기본으로 `~/.local/state/raptor-qdrant/raptor-qdrant.log` 에도 같은 내용이 쓰인다. 다른 터미널에서 `tail -f` 로 보면 된다. 중간에 죽어도 그때까지 적재된 레이어는 남아 있고, 다음 `index` 가 끝나지 않은 세대를 치우고 새로 시작한다.
+진행은 로그로 본다. 잎 임베딩은 배치마다, 요약은 레이어별 10% 단위로 남기고, 기본으로 `~/.local/state/raptor-qdrant/raptor-qdrant.log`에도 같은 내용이 쓰인다. 다른 터미널에서 `tail -f`로 보면 된다. 중간에 죽어도 그때까지 적재된 레이어는 남아 있고, 다음 `index`가 끝나지 않은 세대를 치우고 새로 시작한다.
 
 ## 질의 파이프라인
 
-하이브리드 검색으로 후보 48개를 받아 그중 12개를 고른다(`alpha=0.8`, 벡터 8 대 키워드 2). 고를 때 요약 노드 자리 4개를 남긴다. 포인트의 85%가 잎이라 점수순으로 그냥 자르면 개괄 질문에도 잎만 남기 때문이다. 후보에 요약이 없으면 그 자리는 잎으로 메운다.
+검색으로 후보 48개를 받아 그중 12개를 고른다. 고를 때 요약 노드 자리 4개를 남긴다. 포인트의 85%가 잎이라 점수순으로 그냥 자르면 개괄 질문에도 잎만 남기 때문이다. 후보에 요약이 없으면 그 자리는 잎으로 메운다.
 
-고른 청크는 컨텍스트 예산 4096토큰이 찰 때까지 이어붙여 LLM에 넘긴다. 각 청크에는 `[근거 N | 원문 또는 요약 | 출처]` 머리표를 붙인다. 본문만 넘기면 모델은 무엇이 원문이고 무엇이 요약인지 모른 채 답한다. 요약은 자기가 덮는 노트를 전부 달고 있어서 특정 주장의 직접 근거로 쓰면 안 되는데, 그 구분도 본문만으로는 전할 수 없다. 같은 본문이 두 번 들어오면 두 번째는 버린다.
+`alpha`는 1.0, 곧 dense 단독이다. 컬렉션은 sparse 벡터도 들고 있지만 가중치를 주지 않는다. 라이브러리 기본 sparse 모델이 영어 전용이라 한국어 볼트에서는 점수를 깎는다. 질문 45개로 쓸어보니 dense 단독이 모든 지표에서 가장 좋았고(note recall@1 96% → 100%), sparse 비중을 올릴수록 무너졌다. 한국어를 아는 sparse 모델로 갈아끼우면 그때 다시 잴 값이다.
 
-`start_layer` 로 레이어를 지정하면 그 조건이 Qdrant 에 필터로 내려간다. 받아온 뒤에 거르면 그 레이어의 좋은 후보는 애초에 후보에 없다.
+요약이 걸리면 그 요약이 덮는 노트로 범위를 좁혀 원문을 여섯 개까지 더 가져온다. 요약은 자기가 덮는 노트 이름을 전부 달고 있어서 검색 성적표에는 잘 찍히지만, 답을 쓰려면 이름이 아니라 문장이 필요하다. 이 확장이 없을 때 가로지르는 질문에서 정답 노트의 34%만 원문으로 왔다. 확장과 예산을 함께 올려 63%가 됐다. 둘 중 하나만 해서는 듣지 않는다.
 
-`RERANKER_MODEL` 을 주면 고르기 전에 크로스 인코더가 후보를 다시 줄 세운다. 하이브리드 검색은 질문과 청크를 따로 벡터로 만들어 견주지만 크로스 인코더는 둘을 함께 읽는다. 그만큼 잘 맞히고 그만큼 느리다. 기본값은 꺼짐이다. 볼트 질문 45개로 잰 값이다.
+고른 청크는 컨텍스트 예산 8192토큰이 찰 때까지 이어붙여 LLM에 넘긴다. 각 청크에는 `[근거 N | 원문 또는 요약 | 출처]` 머리표를 붙인다. 본문만 넘기면 모델은 무엇이 원문이고 무엇이 요약인지 모른 채 답한다. 요약은 자기가 덮는 노트를 전부 달고 있어서 특정 주장의 직접 근거로 쓰면 안 되는데, 그 구분도 본문만으로는 전할 수 없다. 같은 본문이 두 번 들어오면 두 번째는 버린다.
+
+`start_layer`로 레이어를 지정하면 그 조건이 Qdrant에 필터로 내려간다. 받아온 뒤에 거르면 그 레이어의 좋은 후보는 애초에 후보에 없다.
+
+`RERANKER_MODEL`을 주면 고르기 전에 크로스 인코더가 후보를 다시 줄 세운다. 하이브리드 검색은 질문과 청크를 따로 벡터로 만들어 견주지만 크로스 인코더는 둘을 함께 읽는다. 그만큼 잘 맞히고 그만큼 느리다. 기본값은 꺼짐이다. 볼트 질문 45개로 잰 값이다.
 
 | 설정 | broad recall@1 | broad coverage | 질의당 |
 |---|---|---|---|
@@ -58,7 +62,7 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
 | 켬, `RERANK_CANDIDATES=16` | 90% | 91% | 3초 |
 | 켬, 후보 48개 전부 | 90% | 94% | 18~28초 |
 
-상위 한 자리 정확도는 열여섯 개만 채점해도 얻는다. coverage 는 아래쪽 후보를 끌어올려야 오르는 값이라 전부 채점해야 한다. CPU 기준이고 GPU 에서는 셈이 달라진다.
+상위 한 자리 정확도는 열여섯 개만 채점해도 얻는다. coverage는 아래쪽 후보를 끌어올려야 오르는 값이라 전부 채점해야 한다. CPU 기준이고 GPU에서는 셈이 달라진다.
 
 ```python
 from raptor_qdrant.database.qdrant_manager import QdrantManager
@@ -141,8 +145,8 @@ uv run raptor-qdrant status                 # 적재 현황
 uv run raptor-qdrant eval                   # 검색 성적 측정
 ```
 
-Docker 로 통째로 띄우려면 compose 를 쓴다. Qdrant 가 함께 올라오고, Ollama 는
-호스트에서 돌고 있는 것을 쓴다. macOS 에서 컨테이너 안의 Ollama 는 Metal 을
+Docker로 통째로 띄우려면 compose를 쓴다. Qdrant가 함께 올라오고, Ollama는
+호스트에서 돌고 있는 것을 쓴다. macOS에서 컨테이너 안의 Ollama는 Metal을
 못 쓰기 때문이다.
 
 ```bash
@@ -162,6 +166,62 @@ docker compose run --rm app index
 
 LLM이 필요한 명령은 `index`, `ask`, `sync --rebuild-tree`뿐이다. `status`와 잎만 갈아끼우는 `sync`·`watch`는 모델을 한 번도 부르지 않으니 Ollama가 꺼져 있어도, API 키가 없어도 돈다. 임베딩 가중치도 실제로 쓸 때 올린다.
 
+## 쓰는 법
+
+**처음 한 번.** 볼트 전체로 트리를 세운다. 노트 130개 남짓이면 임베딩에 30분, 요약에 10분쯤 걸린다.
+
+```bash
+uv run raptor-qdrant index --allow-remote-llm
+```
+
+도는 동안 진행은 로그로 본다. 다른 터미널에서 `tail -f ~/.local/state/raptor-qdrant/raptor-qdrant.log`를 걸어두면 된다. 중간에 죽어도 그때까지 적재된 레이어는 남는다. 다음 `index`가 끝나지 않은 세대를 치우고 새로 시작한다.
+
+**평소에는 묻기만 한다.**
+
+```bash
+uv run raptor-qdrant ask "인천 IDC 관련해 정리해둔 게 뭐가 있나"
+uv run raptor-qdrant ask "Consul은 어떻게 배포했나" --show-chunks 5
+```
+
+`--show-chunks`를 주면 어느 레이어에서 몇 점으로 걸렸는지 보인다. 답이 이상할 때 검색이 잘못 물어온 것인지 모델이 잘못 읽은 것인지 가르는 데 쓴다. 답변 아래의 근거 노트는 관련도 순서다.
+
+**노트를 고치면 잎만 갈아끼운다.** 트리를 다시 세우는 데는 LLM 요약이 붙어 오래 걸리니 저장할 때마다 그걸 돌리지 않는다.
+
+```bash
+uv run raptor-qdrant sync --dry-run   # 무엇이 바뀌었는지만
+uv run raptor-qdrant sync             # 반영
+uv run raptor-qdrant watch            # 저장될 때마다 자동으로
+```
+
+`watch`는 띄워두면 된다. 잎만 건드리므로 LLM도 API 키도 필요 없다.
+
+**가끔 상태를 본다.**
+
+```bash
+uv run raptor-qdrant status
+```
+
+"현재 트리 밖의 잎"이 20%를 넘으면 요약 레이어가 그만큼 낡았다는 뜻이다. 그때 `sync --rebuild-tree`로 트리를 다시 세운다. 한 달에 한 번쯤이면 충분하다.
+
+**설정을 바꿨으면 재본다.** 청킹이나 임베딩을 건드렸으면 재인덱싱이 필요하지만, 검색 쪽 설정은 바로 잴 수 있다.
+
+```bash
+uv run raptor-qdrant eval
+```
+
+### 어떤 명령에 무엇이 필요한가
+
+| 명령 | Qdrant | LLM | 임베딩 모델 |
+|---|---|---|---|
+| `status` | 필요 | 안 씀 | 안 올림 |
+| `sync --dry-run` | 필요 | 안 씀 | 안 올림 |
+| `sync`, `watch` | 필요 | 안 씀 | 올림 |
+| `eval` | 필요 | `--build` 일 때만 | 올림 |
+| `ask` | 필요 | 필요 | 올림 |
+| `index`, `sync --rebuild-tree` | 필요 | 필요 | 올림 |
+
+Ollama가 꺼져 있거나 API 키가 없어도 위쪽 네 줄은 돈다.
+
 ## 설정
 
 `.env` 파일이나 환경변수로 덮어쓴다. 둘 다 있으면 환경변수가 이긴다.
@@ -174,9 +234,9 @@ LLM이 필요한 명령은 `index`, `ask`, `sync --rebuild-tree`뿐이다. `stat
 | `COLLECTION_NAME` | `obsidian` | 기본 Qdrant 컬렉션 |
 | `STATE_DIR` | `~/.local/state/raptor-qdrant` | 빌드 락 같은 실행 상태를 두는 곳 |
 | `EMBEDDING_MODEL` | `nlpai-lab/KURE-v1` | SentenceTransformer 모델 (항상 로컬) |
-| `EMBEDDING_DEVICE` | (비움) | 비우면 자동. mac 에서는 `cpu` 를 고른다 |
+| `EMBEDDING_DEVICE` | (비움) | 비우면 자동. mac에서는 `cpu`를 고른다 |
 | `RERANKER_MODEL` | (비움) | 후보를 다시 줄 세울 크로스 인코더. 비우면 안 한다 |
-| `RERANK_CANDIDATES` | `0` | 다시 세울 후보 수. 0 이면 전부 |
+| `RERANK_CANDIDATES` | `0` | 다시 세울 후보 수. 0이면 전부 |
 | `LLM_PROVIDER` | `ollama` | `ollama` · `anthropic`(=`claude`) · `openai`(=`chatgpt`) · `bedrock` |
 | `SUMMARY_MODEL` | (비움) | 요약 전용 모델. 비우면 답변 모델을 그대로 쓴다 |
 | `SUMMARY_WORKERS` | `0` | 클러스터 요약 동시 실행 수. 0이면 공급자 기본값(ollama 2, bedrock 10, claude·chatgpt 8) |
@@ -194,7 +254,7 @@ LLM이 필요한 명령은 `index`, `ask`, `sync --rebuild-tree`뿐이다. `stat
 | `LOG_FILE` | `~/.local/state/raptor-qdrant/raptor-qdrant.log` | 진행 로그 파일. 10MB 회전, 5개 보관. 비우면 stdout만 |
 | `ENVIRONMENT` | `local` | `production`이면 JSON 구조화 로그로 전환 |
 
-검색·청킹·트리 관련 수치는 `src/raptor_qdrant/rag/constants.py`에 모여 있다. 청크 최대 토큰(512), 컨텍스트 예산(4096), top-k(12), 요약 쿼터(4), 하이브리드 가중치(0.8), 임베딩 배치(64) 같은 값들이다.
+검색·청킹·트리 관련 수치는 `src/raptor_qdrant/rag/constants.py`에 모여 있다. 청크 최대 토큰(512), 컨텍스트 예산(8192), top-k(12), 요약 쿼터(4), 원문 확장(6), 하이브리드 가중치(1.0), 임베딩 배치(64) 같은 값들이다.
 
 인덱싱 시간의 대부분은 요약이다. Ollama 서버는 `OLLAMA_NUM_PARALLEL`(기본 1)만큼만 동시에 받으므로 `SUMMARY_WORKERS`를 올리려면 서버도 같이 올려야 하고, 슬롯마다 KV 캐시가 붙어 메모리를 더 쓴다. 메모리가 빠듯하면 `SUMMARY_MODEL`에 더 작은 모델(예: `qwen2.5:3b`, `claude-haiku-4-5`)을 두는 쪽이 낫다. 중간 요약은 검색 앵커 역할이라 답변 모델만큼 클 필요가 없다. 돈이 나가는 공급자라면 더 그렇다.
 
@@ -212,7 +272,7 @@ uv run raptor-qdrant eval                                      # 재기만 (LLM 
 
 노트 하나로 만든 질문은 그 노트의 어휘를 그대로 물고 있어서 검색이 거의 틀리지 않는다. 실제로 첫 측정에서 recall이 100%, MRR이 0.967로 천장에 닿았다. 그 자로는 개선을 잴 수 없다. `--broad`는 요약 노드에서 질문을 만들고 그 요약이 덮는 노트 전부를 정답으로 삼는다. 트리가 실제로 쓰이는지를 재려면 이쪽이 필요하다.
 
-점수는 여러 개를 같이 본다. recall@1과 @3이 함께 있어야 자가 포화됐는지 보인다. 원문 recall은 요약이 정답을 스치는 것과 원문이 실제로 걸린 것을 가른다. coverage는 묶음 질문에서 정답 노트를 몇 개나 덮었는지다. 예산 사용률은 컨텍스트를 놀리는지 알려준다.
+점수는 여러 개를 같이 본다. recall@1과 @3이 함께 있어야 자가 포화됐는지 보인다. coverage는 묶음 질문에서 정답 노트를 몇 개나 덮었는지고, 괄호 안의 원문 coverage는 그중 실제 원문으로 온 비율이다. 이 둘은 갈라서 봐야 한다. 요약은 덮는 노트를 전부 나열하므로 이름만 스쳐도 coverage가 오른다. 실제로 coverage 90%인 상태에서 원문 coverage는 34%였다. 예산 사용률은 컨텍스트를 놀리는지 알려준다.
 
 **질문은 저장소에 두지 않는다.** 볼트 내용에서 나온 것이라 함께 공개된다. `STATE_DIR/eval/<컬렉션>.jsonl`에 쌓이고 저장소에는 도구만 있다.
 
@@ -233,7 +293,7 @@ uv run raptor-qdrant eval                                      # 재기만 (LLM 
 
 달라졌으면 바뀐 노트의 잎만 갈아끼운다. 트리를 다시 세우는 데는 LLM 요약이 붙어 몇십 분에서 몇 시간이 걸리니 저장할 때마다 그걸 돌릴 수는 없다. 트리 간선은 적재되지 않으므로 잎만 바꿔도 기존 요약 노드는 깨지지 않고, 내용만 그만큼 낡는다. 얼마나 낡았는지는 `tree_generation`으로 센다. 현재 트리 밖의 잎이 20%를 넘으면 `status`와 `sync`가 `--rebuild-tree`를 권한다.
 
-노트를 지우면 그 노트를 덮던 요약도 함께 검색에서 뺀다. 요약은 원문이 사라져도 그 내용을 그대로 물고 있다. 낡은 것과 없는 것은 다르다. 재구축 전까지는 그 요약이 없는 노트를 근거로 내놓지 않게 표시해 둔다. 몇 개가 빠졌는지는 `status` 에 나온다.
+노트를 지우면 그 노트를 덮던 요약도 함께 검색에서 뺀다. 요약은 원문이 사라져도 그 내용을 그대로 물고 있다. 낡은 것과 없는 것은 다르다. 재구축 전까지는 그 요약이 없는 노트를 근거로 내놓지 않게 표시해 둔다. 몇 개가 빠졌는지는 `status`에 나온다.
 
 `watch`는 같은 일을 저장 시점마다 한다. 옵시디언이 타이핑 중에도 자주 저장하므로 파일별로 3초 조용해질 때까지 기다렸다가 한 번만 반영한다.
 
@@ -256,7 +316,7 @@ engine.indexed_content_hashes()  # 증분 판단용 해시
 
 ## 개발
 
-품질 검사는 CI 가 도는 것과 같다. 테스트는 Qdrant 나 LLM 없이 순수 로직만 본다.
+품질 검사는 CI가 도는 것과 같다. 테스트는 Qdrant나 LLM 없이 순수 로직만 본다.
 
 ```bash
 uv run pytest              # 테스트
@@ -275,7 +335,7 @@ uv run mypy                # 타입 검사
 | `test_node_embedding.py` | 잎 임베딩이 배치로 나가고 이미 있는 임베딩은 다시 계산하지 않는다 |
 | `test_build_lock.py` | 살아 있는 빌드는 막고 죽은 빌드의 흔적은 넘겨준다 |
 | `test_index_health.py` | 낡은 비율과 세대 섞임 판정 |
-| `test_log_file.py` | 표준 logging 이 파일 sink 까지 닿는다 |
+| `test_log_file.py` | 표준 logging이 파일 sink까지 닿는다 |
 | `test_chunk_tagging.py` | 청크마다 토큰 수를 따로 센다 (부모 값을 물려받으면 검색이 죽는다) |
 | `test_context_window.py` | 큰 노드 하나가 컨텍스트 전체를 비우지 않는다 |
 | `test_token_count.py` | `token_count`가 없거나 망가져도 터지지 않는다 |
@@ -284,7 +344,7 @@ uv run mypy                # 타입 검사
 | `test_tree_structure.py` | 노드와 레이어 매핑 |
 | `test_clustering_utils.py` | 데이터가 적을 때의 클러스터 수 경계 |
 | `test_llm_factory.py` | 공급자 선택·별칭·원격 판정, 지연 생성, 오류 메시지 |
-| `test_llm_requests.py` | Claude·ChatGPT 가 보내는 요청 모양 (effort·temperature·거절 처리·OAuth) |
+| `test_llm_requests.py` | Claude·ChatGPT가 보내는 요청 모양 (effort·temperature·거절 처리·OAuth) |
 | `test_layer_mix.py` | 상위 k 안에 요약 자리를 남기되 관련도 순서를 지킨다 |
 | `test_reranker.py` | 재순위화가 순서와 점수를 바꾸고 채점 상한을 지킨다 |
 | `test_chunk_merging.py` | 작은 조각을 이웃에 붙이고 큰 조각은 상한 안으로 자른다 |
@@ -313,7 +373,7 @@ src/raptor_qdrant/
     ├── retriever/             Qdrant 하이브리드 검색, 컨텍스트 예산 조립
     ├── eval/                  검색 성적 측정 (질문 생성, 집계)
     ├── llm/                   LLM 공급자 (base·ollama·claude·chatgpt·bedrock + 팩토리)
-    │                          공급자는 complete 만 구현하고, 답변 템플릿은 base 가 씌운다
+    │                          공급자는 complete만 구현하고, 답변 템플릿은 base가 씌운다
     └── prompt/                요약·답변 프롬프트
 tests/                         Qdrant·LLM 없이 도는 단위 테스트
 ```
