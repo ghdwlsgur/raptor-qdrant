@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 from collections.abc import Iterator, Sequence
@@ -9,6 +10,19 @@ from raptor_qdrant.core.config import settings
 
 SCROLL_PAGE_SIZE = 10000
 DOCUMENT_NAME_KEY = "document_name"
+# llama-index 는 본문을 평평한 text 필드가 아니라 이 JSON 안에 넣는다
+NODE_CONTENT_KEY = "_node_content"
+
+
+def stored_text(payload: dict[str, Any]) -> str:
+    """포인트 payload 에서 본문을 꺼낸다."""
+    raw = payload.get(NODE_CONTENT_KEY)
+    if not isinstance(raw, str):
+        return ""
+    try:
+        return str(json.loads(raw).get("text", ""))
+    except (ValueError, TypeError):
+        return ""
 
 
 class QdrantManager:

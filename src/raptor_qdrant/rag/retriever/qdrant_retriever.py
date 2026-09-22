@@ -1,6 +1,7 @@
 import logging
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from llama_index.core import Settings, VectorStoreIndex
@@ -30,6 +31,8 @@ from raptor_qdrant.rag.constants import (
     DEFAULT_SOURCE_EXPANSION,
     DEFAULT_SUMMARY_QUOTA,
     DEFAULT_TOP_K,
+    LAYER_KEY,
+    LEAF_LAYER,
     SOURCE_KEY,
     SOURCE_SET_KEY,
     STALE_KEY,
@@ -49,79 +52,55 @@ from .reranker import BaseReranker, default_reranker, rerank
 
 logger = logging.getLogger(__name__)
 
-LAYER_KEY = "layer"
-LEAF_LAYER = 0
-
 Payload = Mapping[str, Any]
 
 
+@dataclass
 class QdrantRetrieverConfig:
-    def __init__(
-        self,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        embedding_model: BaseEmbeddingModel | None = None,
-        top_k: int = DEFAULT_TOP_K,
-        collection_name: str = DEFAULT_COLLECTION_NAME,
-        hybrid_alpha: float = DEFAULT_HYBRID_ALPHA,
-        summary_quota: int = DEFAULT_SUMMARY_QUOTA,
-        candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
-        reranker: BaseReranker | None = None,
-        source_expansion: int = DEFAULT_SOURCE_EXPANSION,
-    ):
-        """Retriever 설정 객체
+    collection_name: str = DEFAULT_COLLECTION_NAME
+    embedding_model: BaseEmbeddingModel = field(
+        default_factory=KoreanEmbeddingModel
+    )
+    # 컨텍스트에 담을 최대 토큰 수
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    # 최종적으로 고를 청크 수
+    top_k: int = DEFAULT_TOP_K
+    # 0 에 가까울수록 키워드, 1 에 가까울수록 의미 기반
+    hybrid_alpha: float = DEFAULT_HYBRID_ALPHA
+    # 상위 top_k 안에 남겨 둘 요약 노드 자리
+    summary_quota: int = DEFAULT_SUMMARY_QUOTA
+    # top_k 의 몇 배를 후보로 받아올지
+    candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER
+    # 걸린 요약이 덮는 노트에서 더 가져올 원문 수
+    source_expansion: int = DEFAULT_SOURCE_EXPANSION
+    reranker: BaseReranker | None = field(default_factory=default_reranker)
+    # 다시 줄 세울 후보 수. 0 이면 받아온 후보 전부
+    rerank_candidates: int = field(
+        default_factory=lambda: max(0, settings.RERANK_CANDIDATES)
+    )
 
-        Args:
-            max_tokens (int, optional): 검색 컨텍스트의 최대 토큰 수
-            embedding_model (Optional[BaseEmbeddingModel], optional): 임베딩 모델
-            top_k (int, optional): DB에서 검색할 가장 유사한 문서 개수
-            collection_name (str, optional): Qdrant 컬렉션 이름
-            hybrid_alpha (float, optional): 하이브리드 검색 가중치 (0: 키워드, 1: 벡터)
-            summary_quota (int, optional): 상위 top_k 안에 남겨 둘 요약 노드 자리
-            candidate_multiplier (int, optional): top_k 의 몇 배를 후보로 받아올지
-            reranker (Optional[BaseReranker], optional): 후보를 다시 줄 세울 모델
-        """
-        self._validate_parameters(
-            max_tokens, top_k, hybrid_alpha, embedding_model, summary_quota
-        )
-
-        self.top_k = top_k
-        self.max_tokens = max_tokens
-        self.embedding_model = embedding_model or KoreanEmbeddingModel()
-        self.embedding_model_string = settings.EMBEDDING_MODEL_STRING
-        self.collection_name = collection_name
-        # 0에 가까울 수록 텍스트 유사도 기반 검색, 1에 가까울 수록 의미 기반 검색
-        self.hybrid_alpha = hybrid_alpha
-        self.summary_quota = min(summary_quota, top_k)
-        self.candidate_multiplier = max(1, candidate_multiplier)
-        self.reranker = (
-            reranker if reranker is not None else default_reranker()
-        )
-        self.rerank_candidates = max(0, settings.RERANK_CANDIDATES)
-        self.source_expansion = max(0, source_expansion)
-
-    def _validate_parameters(
-        self,
-        max_tokens: int,
-        top_k: int,
-        hybrid_alpha: float,
-        embedding_model: BaseEmbeddingModel | None,
-        summary_quota: int = 0,
-    ) -> None:
-        if max_tokens < 1:
+    def __post_init__(self) -> None:
+        if self.max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
-        if top_k < 1:
+        if self.top_k < 1:
             raise ValueError("top_k must be at least 1")
-        if summary_quota < 0:
+        if self.summary_quota < 0:
             raise ValueError("summary_quota must not be negative")
-        if not 0.0 <= hybrid_alpha <= 1.0:
+        if not 0.0 <= self.hybrid_alpha <= 1.0:
             raise ValueError("hybrid_alpha must be between 0.0 and 1.0")
-
-        if embedding_model is not None and not isinstance(
-            embedding_model, BaseEmbeddingModel
-        ):
+        if not isinstance(self.embedding_model, BaseEmbeddingModel):
             raise ValueError(
                 "embedding_model must be an instance of BaseEmbeddingModel"
             )
+
+        self.summary_quota = min(self.summary_quota, self.top_k)
+        self.candidate_multiplier = max(1, self.candidate_multiplier)
+        self.source_expansion = max(0, self.source_expansion)
+        self.rerank_candidates = max(0, self.rerank_candidates)
+
+    @property
+    def embedding_model_string(self) -> str:
+        return settings.EMBEDDING_MODEL_STRING
 
     @property
     def candidate_pool(self) -> int:
@@ -291,7 +270,10 @@ class QdrantRetriever(BaseRetriever):
         extra_payload_by_source: Mapping[str, Payload] | None,
         common_payload: Payload | None,
     ) -> TextNode:
-        metadata: dict[str, Any] = {"layer": layer, "node_index": node.index}
+        metadata: dict[str, Any] = {
+            LAYER_KEY: layer,
+            "node_index": node.index,
+        }
 
         if document_name:
             metadata[SOURCE_KEY] = document_name
@@ -420,37 +402,48 @@ class QdrantRetriever(BaseRetriever):
             raise ValueError("query must be a non-empty string")
 
         try:
-            retrieved_nodes = self._candidates(
-                query, collapse_tree, start_layer
+            candidates = self._live(
+                self._candidates(query, collapse_tree, start_layer)
             )
-            candidates = self._live(retrieved_nodes)
-            if self.config.reranker:
-                candidates = rerank(
-                    query,
-                    candidates,
-                    self.config.reranker,
-                    self.config.rerank_candidates,
-                )
-            selected = (
-                balance_layers(
-                    candidates,
-                    self.config.top_k,
-                    self.config.summary_quota,
-                )
-                if collapse_tree
-                else candidates[: self.config.top_k]
-            )
-            if self.config.source_expansion and collapse_tree:
-                selected = selected + self._expand_sources(query, selected)
+            selected = self._select(query, candidates, collapse_tree)
 
             window = assemble_context(selected, self.config.max_tokens)
-            self._log_window(window, len(retrieved_nodes))
+            self._log_window(window, len(candidates))
 
             return window.text, window.chunk_info
 
         except Exception as e:
             logger.error(f"failed to retrieve context: {e}")
             raise
+
+    def _select(
+        self,
+        query: str,
+        candidates: list[NodeWithScore],
+        collapse_tree: bool,
+    ) -> list[NodeWithScore]:
+        """후보에서 컨텍스트에 넣을 것을 고른다.
+
+        레이어를 하나로 좁혀 달라고 했으면 쿼터도 확장도 뜻이 없다. 그때는
+        점수 순서 그대로 자른다.
+        """
+        if self.config.reranker:
+            candidates = rerank(
+                query,
+                candidates,
+                self.config.reranker,
+                self.config.rerank_candidates,
+            )
+
+        if not collapse_tree:
+            return candidates[: self.config.top_k]
+
+        selected = balance_layers(
+            candidates, self.config.top_k, self.config.summary_quota
+        )
+        if not self.config.source_expansion:
+            return selected
+        return selected + self._expand_sources(query, selected)
 
     def _log_window(self, window: ContextWindow, retrieved_count: int) -> None:
         if window.skipped:

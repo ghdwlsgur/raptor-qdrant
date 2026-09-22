@@ -1,11 +1,11 @@
 from collections.abc import Sequence
 from typing import Any
 
-LEAF_LAYER = 0
+from raptor_qdrant.rag.constants import LAYER_KEY, LEAF_LAYER
 
 
 def is_summary(node: Any) -> bool:
-    layer = node.metadata.get("layer")
+    layer = node.metadata.get(LAYER_KEY)
     return layer is not None and layer > LEAF_LAYER
 
 

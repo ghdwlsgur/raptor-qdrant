@@ -1,4 +1,3 @@
-import json
 import logging
 import uuid
 from collections.abc import Iterable, Mapping
@@ -6,9 +5,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from raptor_qdrant.core.config import settings
-from raptor_qdrant.database.qdrant_manager import QdrantManager
+from raptor_qdrant.database.qdrant_manager import (
+    NODE_CONTENT_KEY,
+    QdrantManager,
+    stored_text,
+)
 from raptor_qdrant.rag.constants import (
     CONTENT_HASH_KEY,
+    LAYER_KEY,
+    LEAF_LAYER,
     SOURCE_KEY,
     SOURCE_SET_KEY,
     STALE_KEY,
@@ -33,19 +38,6 @@ from .retriever.qdrant_retriever import (
 logger = logging.getLogger(__name__)
 
 NO_CONTEXT_MESSAGE = "no relevant context found to answer the question."
-LEAF_LAYER = 0
-# llama-index 는 본문을 평평한 text 필드가 아니라 이 JSON 안에 넣는다
-NODE_CONTENT_KEY = "_node_content"
-
-
-def _stored_text(payload: dict[str, Any]) -> str:
-    raw = payload.get(NODE_CONTENT_KEY)
-    if not isinstance(raw, str):
-        return ""
-    try:
-        return str(json.loads(raw).get("text", ""))
-    except (ValueError, TypeError):
-        return ""
 
 
 @dataclass(frozen=True)
@@ -342,13 +334,13 @@ class RaptorEngine:
 
         for payload in self.manager.iter_payloads(
             self.collection_name,
-            fields=("layer", NODE_CONTENT_KEY, SOURCE_SET_KEY, STALE_KEY),
+            fields=(LAYER_KEY, NODE_CONTENT_KEY, SOURCE_SET_KEY, STALE_KEY),
         ):
-            if not payload.get("layer") or payload.get(STALE_KEY):
+            if not payload.get(LAYER_KEY) or payload.get(STALE_KEY):
                 continue
 
             sources = payload.get(SOURCE_SET_KEY) or []
-            text = _stored_text(payload)
+            text = stored_text(payload)
             if text and len(sources) >= minimum:
                 found.append((text, list(sources)))
 
@@ -361,12 +353,12 @@ class RaptorEngine:
 
         for payload in self.manager.iter_payloads(
             self.collection_name,
-            fields=("layer", TREE_GENERATION_KEY, STALE_KEY),
+            fields=(LAYER_KEY, TREE_GENERATION_KEY, STALE_KEY),
         ):
             generation = payload.get(TREE_GENERATION_KEY)
             if generation is not None:
                 generations.add(generation)
-            if payload.get("layer") == LEAF_LAYER:
+            if payload.get(LAYER_KEY) == LEAF_LAYER:
                 leaves += 1
                 if generation is None:
                     orphan_leaves += 1
