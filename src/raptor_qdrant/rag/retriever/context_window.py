@@ -2,7 +2,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from raptor_qdrant.rag.constants import SOURCE_KEY, SOURCE_SET_KEY
+from raptor_qdrant.rag.constants import LAYER_KEY, SOURCE_KEY, SOURCE_SET_KEY
 from raptor_qdrant.rag.utils import count_tokens, resolve_token_count
 
 CHUNK_SEPARATOR = "\n\n"
@@ -75,7 +75,7 @@ class ContextWindow:
 def _info_of(node: Any) -> dict[str, Any]:
     return {
         "node_index": node.metadata.get("node_index"),
-        "layer_number": node.metadata.get("layer"),
+        "layer_number": node.metadata.get(LAYER_KEY),
         "chunked_by": node.metadata.get("chunked_by"),
         "token_count": resolve_token_count(node.metadata, node.text),
         "score": getattr(node, "score", 0.0) or 0.0,

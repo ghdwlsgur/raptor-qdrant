@@ -81,6 +81,8 @@ CLUSTER_MIN_NODES_TO_SPLIT = 3
 UMAP_LOCAL_MAX_NEIGHBORS = 10
 
 # ========================================= Corpus
+LAYER_KEY = "layer"
+LEAF_LAYER = 0
 SOURCE_KEY = "document_name"
 SOURCE_SET_KEY = "source_notes"
 CONTENT_HASH_KEY = "content_hash"
