@@ -182,3 +182,51 @@ def test_only_summarising_commands_need_an_llm(
     args = argparse.Namespace(command=command, rebuild_tree=rebuild_tree)
 
     assert needs_llm(args) is expected
+
+
+class FakeHealthEngine:
+    def __init__(self, generations: int) -> None:
+        self.collection_name = "obsidian"
+        self._generations = generations
+
+    def drift(self):
+        from raptor_qdrant.rag.engine import IndexHealth
+
+        return IndexHealth(
+            leaf_nodes=10,
+            summary_nodes=2,
+            leaves_outside_tree=0,
+            generations=self._generations,
+        )
+
+
+def test_a_settled_index_is_measurable(monkeypatch, tmp_path):
+    from raptor_qdrant.cli import refuse_if_unstable
+    from raptor_qdrant.core.config import settings
+
+    monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path))
+
+    assert not refuse_if_unstable(FakeHealthEngine(generations=1))
+
+
+def test_mixed_generations_block_measuring(monkeypatch, tmp_path):
+    from raptor_qdrant.cli import refuse_if_unstable
+    from raptor_qdrant.core.config import settings
+
+    monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path))
+
+    assert refuse_if_unstable(FakeHealthEngine(generations=2))
+
+
+def test_a_running_build_blocks_measuring(monkeypatch, tmp_path):
+    import os
+
+    from raptor_qdrant.cli import refuse_if_unstable
+    from raptor_qdrant.core.config import settings
+    from raptor_qdrant.vault import BuildLock
+
+    monkeypatch.setattr(settings, "STATE_DIR", str(tmp_path))
+    BuildLock.for_collection("obsidian", tmp_path).acquire("obsidian", "gen")
+
+    assert refuse_if_unstable(FakeHealthEngine(generations=1))
+    assert os.getpid() > 0
