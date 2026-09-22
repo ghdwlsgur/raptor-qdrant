@@ -10,6 +10,7 @@ from llama_index.core.node_parser import (
 )
 from llama_index.core.schema import TextNode
 
+from raptor_qdrant.core.config import settings
 from raptor_qdrant.rag.chunker.models.chunk_metadata import (
     ChunkingMethod,
     ChunkMetadata,
@@ -198,6 +199,7 @@ class HybridChunker(BaseChunker):
         buffer_size: int = SEMANTIC_CHUNK_BUFFER_SIZE,
         breakpoint_percentile_threshold: int = SEMANTIC_BREAKPOINT_PERCENTILE,
         min_tokens: int = CHUNK_MIN_TOKENS,
+        semantic: bool | None = None,
     ):
         """초기화 및 파서 설정
 
@@ -210,6 +212,9 @@ class HybridChunker(BaseChunker):
         self.embedding_model = embedding_model
         self.max_tokens = max_tokens
         self.min_tokens = min_tokens
+        self.semantic = (
+            semantic if semantic is not None else settings.SEMANTIC_CHUNKING
+        )
         self.buffer_size = buffer_size
         self.breakpoint_percentile_threshold = breakpoint_percentile_threshold
 
@@ -256,7 +261,9 @@ class HybridChunker(BaseChunker):
             section_token_count = count_tokens(structural_node.text)
             existing_metadata = structural_node.metadata or {}
 
-            is_semantic_split_needed = section_token_count > self.max_tokens
+            is_semantic_split_needed = (
+                self.semantic and section_token_count > self.max_tokens
+            )
             method = (
                 ChunkingMethod.HYBRID
                 if is_semantic_split_needed
