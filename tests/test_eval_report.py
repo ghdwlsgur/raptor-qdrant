@@ -94,3 +94,24 @@ def test_an_older_eval_file_with_one_source_still_loads(tmp_path):
 
     assert cases[0].sources == ("정답.md",)
     assert cases[0].kind == "note"
+
+
+def test_a_summary_name_drop_does_not_count_as_real_evidence():
+    outcome = outcome_of(
+        "질문",
+        ["a.md", "b.md", "c.md"],
+        [chunk(2, ["a.md", "b.md", "c.md"]), chunk(0, ["a.md"])],
+    )
+
+    assert outcome.coverage == 1.0
+    assert outcome.leaf_coverage == 1 / 3
+
+
+def test_leaf_coverage_counts_every_leaf_that_carried_a_source():
+    outcome = outcome_of(
+        "질문",
+        ["a.md", "b.md"],
+        [chunk(0, ["a.md"]), chunk(0, ["b.md"])],
+    )
+
+    assert outcome.leaf_coverage == 1.0

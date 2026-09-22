@@ -63,12 +63,14 @@ def completed(text: str) -> SimpleNamespace:
     )
 
 
-def test_claude_never_sends_temperature(monkeypatch):
-    llm, recorder = claude_with(answered("답"), monkeypatch)
+def test_claude_omits_sampling_for_models_that_reject_it(monkeypatch):
+    llm, recorder = claude_with(
+        answered("답"), monkeypatch, model="claude-opus-5"
+    )
 
     llm.answer("맥락", "질문")
 
-    assert "temperature" not in recorder.sent
+    assert recorder.sent["extra_body"] == {}
 
 
 def test_claude_sends_the_configured_effort(monkeypatch):
@@ -215,3 +217,26 @@ def test_an_empty_token_file_is_rejected(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="empty"):
         Claude()
+
+
+@pytest.mark.parametrize(
+    ("model", "sends"),
+    [
+        ("claude-haiku-4-5", True),
+        ("claude-opus-4-6", True),
+        ("claude-opus-5", False),
+        ("claude-sonnet-5", False),
+        ("claude-fable-5-1", False),
+    ],
+)
+def test_temperature_goes_only_to_models_that_take_it(
+    monkeypatch, model, sends
+):
+    llm, recorder = claude_with(answered("답"), monkeypatch, model=model)
+
+    llm.answer("맥락", "질문")
+
+    if sends:
+        assert recorder.sent["extra_body"] == {"temperature": llm.temperature}
+    else:
+        assert recorder.sent["extra_body"] == {}

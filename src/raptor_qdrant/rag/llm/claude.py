@@ -12,12 +12,24 @@ from raptor_qdrant.rag.constants import (
     ANTHROPIC_MAX_RETRIES,
     ANTHROPIC_MAX_TOKENS,
     ANTHROPIC_OAUTH_BETA,
+    ANTHROPIC_TEMPERATURE,
 )
 from raptor_qdrant.rag.llm.base import BaseChatbotModel
 
 logger = logging.getLogger(__name__)
 
 Effort = Literal["", "low", "medium", "high", "xhigh", "max"]
+
+# 샘플링 파라미터를 받지 않는 계열. 보내면 400 이다. 이들은 사고 깊이를
+# effort 로 조절하고 temperature 자리가 없다
+NO_SAMPLING_PREFIXES = (
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+    "claude-fable",
+    "claude-mythos",
+)
 
 HEALTH_CHECK_MAX_TOKENS = 16
 
@@ -64,12 +76,14 @@ class Claude(BaseChatbotModel):
         effort: Effort | None = None,
         max_tokens: int = ANTHROPIC_MAX_TOKENS,
         oauth_token_file: str | None = None,
+        temperature: float = ANTHROPIC_TEMPERATURE,
     ):
         self.model = model or settings.ANTHROPIC_MODEL
         self.effort: Effort = (
             effort if effort is not None else settings.ANTHROPIC_EFFORT
         )
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
         token = read_oauth_token(
             oauth_token_file
@@ -129,6 +143,25 @@ class Claude(BaseChatbotModel):
             block.text for block in message.content if block.type == "text"
         ).strip()
 
+    def supports_temperature(self) -> bool:
+        """받는 모델에만 보낸다.
+
+        안 보내면 모델 기본값으로 샘플링돼 같은 질문에 같은 근거를 줘도
+        답이 매번 달라진다. 검색 결과를 재구성하는 일에 그 변덕은 값이
+        아니라 비용이다.
+        """
+        return not self.model.startswith(NO_SAMPLING_PREFIXES)
+
+    def _sampling(self) -> dict[str, float]:
+        """SDK 1.x 에는 temperature 타입 인자가 없다. API 는 아직 받는다.
+
+        샘플링을 없앤 계열(Opus 5 등)에 맞춰 SDK 가 인자를 뺐는데, 그것을
+        받는 모델은 여전히 있다. extra_body 로 넘긴다.
+        """
+        if not self.supports_temperature():
+            return {}
+        return {"temperature": self.temperature}
+
     def _betas(self) -> list[str]:
         betas = [ANTHROPIC_FALLBACK_BETA]
         if self.uses_oauth:
@@ -150,6 +183,7 @@ class Claude(BaseChatbotModel):
                 output_config=output_config,
                 betas=self._betas(),
                 fallbacks="default",
+                extra_body=self._sampling(),
             )
         except anthropic.NotFoundError as e:
             raise RuntimeError(

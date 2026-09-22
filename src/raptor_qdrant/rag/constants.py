@@ -1,5 +1,8 @@
 # ========================================= Retriever
-DEFAULT_MAX_TOKENS = 4096
+# 요약이 가리키는 원문까지 담으려면 4096 으로는 모자란다. 확장을 켜고
+# 재보니 노트를 가로지르는 질문의 원문 coverage 가 37% 에서 63% 로 올랐다.
+# 예산만 올리면 6 포인트, 확장만 켜면 3 포인트다. 둘이 함께여야 듣는다
+DEFAULT_MAX_TOKENS = 8192
 # 예산이 병목이 되는 지점. 5 로 두면 4096 토큰 중 36% 만 쓰고 끝난다.
 # 12 면 74%, 16 으로 더 올려도 80% 라 거기서부터는 예산이 먼저 찬다
 DEFAULT_TOP_K = 12
@@ -8,8 +11,15 @@ DEFAULT_SUMMARY_QUOTA = 4
 # 레이어를 섞으려면 top_k 보다 넉넉히 받아 와야 고를 것이 생긴다. 실측으로
 # 개괄 질문의 첫 요약이 24 등까지 내려간 적이 있다
 DEFAULT_CANDIDATE_MULTIPLIER = 4
+# 요약이 걸리면 그 요약이 덮는 노트에서 원문을 이만큼 더 가져온다. 0 이면
+# 하지 않는다. 요약은 이름을 나열할 뿐 답에 쓸 문장을 주지 않는다
+DEFAULT_SOURCE_EXPANSION = 6
 DEFAULT_COLLECTION_NAME = "default_collection"
-DEFAULT_HYBRID_ALPHA = 0.8
+# 1.0 이면 dense 단독, 0 에 가까울수록 키워드. 기본 sparse 모델이 영어
+# 전용이라 한국어 볼트에서는 점수를 깎는다. 질문 45개로 재보니 dense 단독이
+# 모든 지표에서 가장 좋았다 (note recall@1 96%→100%, MRR 0.943→0.954).
+# 한국어를 아는 sparse 모델로 갈아끼우면 그때 다시 잴 값이다
+DEFAULT_HYBRID_ALPHA = 1.0
 DEFAULT_BATCH_SIZE = 64
 
 # ========================================= Tokenizer
@@ -41,6 +51,7 @@ OLLAMA_TIMEOUT_SECONDS = 300
 # 사고에 다 쓰고 본문이 잘린 채 stop_reason=max_tokens 로 끝난다
 ANTHROPIC_MAX_TOKENS = 8192
 ANTHROPIC_MAX_RETRIES = 3
+ANTHROPIC_TEMPERATURE = 0.1
 # 안전 분류기가 거절하면 같은 호출 안에서 대체 모델로 한 번 더 태운다
 ANTHROPIC_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Authorization: Bearer 인증을 여는 플래그. SDK 는 자격증명 공급자 경로에서만

@@ -21,6 +21,10 @@ class QueryOutcome:
     leaf_hit_rank: int | None = None
     # 정답 노트 중 컨텍스트에 들어온 개수
     covered: int = 0
+    # 그중 원문 청크로 들어온 개수. 요약은 덮는 노트를 전부 나열하므로
+    # 이름만 스쳐도 covered 에 잡힌다. 답에 쓸 사실이 실제로 왔는지는
+    # 원문으로 세야 안다
+    covered_by_leaf: int = 0
     summaries: int = 0
     tokens: int = 0
     chunks: int = 0
@@ -30,6 +34,12 @@ class QueryOutcome:
         if not self.sources:
             return 0.0
         return self.covered / len(self.sources)
+
+    @property
+    def leaf_coverage(self) -> float:
+        if not self.sources:
+            return 0.0
+        return self.covered_by_leaf / len(self.sources)
 
 
 def outcome_of(
@@ -42,6 +52,7 @@ def outcome_of(
     wanted = {sources} if isinstance(sources, str) else set(sources)
     hit = leaf_hit = None
     seen: set[str] = set()
+    seen_in_leaves: set[str] = set()
 
     for rank, chunk in enumerate(chunk_info, start=1):
         found = wanted.intersection(chunk.get("sources") or [])
@@ -51,8 +62,10 @@ def outcome_of(
         seen.update(found)
         if hit is None:
             hit = rank
-        if leaf_hit is None and not chunk.get("layer_number"):
-            leaf_hit = rank
+        if not chunk.get("layer_number"):
+            seen_in_leaves.update(found)
+            if leaf_hit is None:
+                leaf_hit = rank
 
     return QueryOutcome(
         question=question,
@@ -61,6 +74,7 @@ def outcome_of(
         hit_rank=hit,
         leaf_hit_rank=leaf_hit,
         covered=len(seen),
+        covered_by_leaf=len(seen_in_leaves),
         summaries=sum(1 for c in chunk_info if c.get("layer_number")),
         tokens=sum(c.get("token_count") or 0 for c in chunk_info),
         chunks=len(chunk_info),
@@ -117,6 +131,15 @@ class EvalReport:
         return _mean([o.coverage for o in self.outcomes])
 
     @property
+    def leaf_coverage(self) -> float:
+        """정답 노트 중 원문 청크로 들어온 비율.
+
+        요약이 이름만 나열해도 coverage 는 올라간다. 답에 쓸 사실이 실제로
+        컨텍스트에 왔는지는 이 값이 말한다.
+        """
+        return _mean([o.leaf_coverage for o in self.outcomes])
+
+    @property
     def budget_use(self) -> float:
         return _mean([o.tokens for o in self.outcomes]) / self.max_tokens
 
@@ -139,7 +162,7 @@ class EvalReport:
             f"질문 {self.total}개 | recall@1 {self.recall_at(1):.0%} "
             f"@3 {self.recall_at(3):.0%} @5 {self.recall_at(5):.0%} "
             f"전체 {self.recall:.0%} | MRR {self.mrr:.3f} | "
-            f"coverage {self.coverage:.0%} | 원문 {self.leaf_recall:.0%} | "
+            f"coverage {self.coverage:.0%}(원문 {self.leaf_coverage:.0%}) | "
             f"예산 {self.budget_use:.0%} | 요약 {self.avg_summaries:.1f}개"
         )
 

@@ -27,9 +27,11 @@ from raptor_qdrant.rag.constants import (
     DEFAULT_COLLECTION_NAME,
     DEFAULT_HYBRID_ALPHA,
     DEFAULT_MAX_TOKENS,
+    DEFAULT_SOURCE_EXPANSION,
     DEFAULT_SUMMARY_QUOTA,
     DEFAULT_TOP_K,
     SOURCE_KEY,
+    SOURCE_SET_KEY,
     STALE_KEY,
     TREE_GENERATION_KEY,
 )
@@ -48,6 +50,7 @@ from .reranker import BaseReranker, default_reranker, rerank
 logger = logging.getLogger(__name__)
 
 LAYER_KEY = "layer"
+LEAF_LAYER = 0
 
 Payload = Mapping[str, Any]
 
@@ -63,6 +66,7 @@ class QdrantRetrieverConfig:
         summary_quota: int = DEFAULT_SUMMARY_QUOTA,
         candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
         reranker: BaseReranker | None = None,
+        source_expansion: int = DEFAULT_SOURCE_EXPANSION,
     ):
         """Retriever 설정 객체
 
@@ -93,6 +97,7 @@ class QdrantRetrieverConfig:
             reranker if reranker is not None else default_reranker()
         )
         self.rerank_candidates = max(0, settings.RERANK_CANDIDATES)
+        self.source_expansion = max(0, source_expansion)
 
     def _validate_parameters(
         self,
@@ -236,6 +241,43 @@ class QdrantRetriever(BaseRetriever):
         return self._build_retriever(self._layer_filter(start_layer)).retrieve(
             query
         )
+
+    def _expand_sources(
+        self, query: str, selected: list[NodeWithScore]
+    ) -> list[NodeWithScore]:
+        """걸린 요약이 덮는 노트에서 원문을 더 끌어온다.
+
+        요약은 자기가 덮는 노트 이름을 전부 달고 있어서 검색 성적표에는
+        잘 찍힌다. 그런데 답을 쓰려면 이름이 아니라 문장이 필요하다. 실측으로
+        노트를 가로지르는 질문에서 정답 노트의 34% 만 원문으로 들어왔다.
+        요약이 가리키는 노트로 범위를 좁혀 질문과 가까운 원문을 더 가져온다.
+        """
+        covered: set[str] = set()
+        for node in selected:
+            if node.metadata.get(LAYER_KEY):
+                covered.update(node.metadata.get(SOURCE_SET_KEY) or [])
+
+        already = {
+            node.metadata.get(SOURCE_KEY)
+            for node in selected
+            if not node.metadata.get(LAYER_KEY)
+        }
+        wanted = sorted(covered - already)
+        if not wanted:
+            return []
+
+        filters = MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key=SOURCE_KEY, value=wanted, operator=FilterOperator.IN
+                ),
+                MetadataFilter(
+                    key=LAYER_KEY, value=LEAF_LAYER, operator=FilterOperator.EQ
+                ),
+            ]
+        )
+        found = self._build_retriever(filters).retrieve(query)
+        return self._live(found)[: self.config.source_expansion]
 
     @staticmethod
     def _live(nodes: list[NodeWithScore]) -> list[NodeWithScore]:
@@ -398,6 +440,8 @@ class QdrantRetriever(BaseRetriever):
                 if collapse_tree
                 else candidates[: self.config.top_k]
             )
+            if self.config.source_expansion and collapse_tree:
+                selected = selected + self._expand_sources(query, selected)
 
             window = assemble_context(selected, self.config.max_tokens)
             self._log_window(window, len(retrieved_nodes))

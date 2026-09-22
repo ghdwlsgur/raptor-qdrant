@@ -8,12 +8,11 @@
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.rag.constants import CHUNK_MAX_TOKENS
-from raptor_qdrant.rag.embedding import embedding_device
+from raptor_qdrant.rag.embedding import embedding_device, shared_model
 
 if TYPE_CHECKING:
     from sentence_transformers import CrossEncoder
@@ -31,7 +30,9 @@ class BaseReranker(ABC):
         return self.__class__.__name__
 
 
-@cache
+_CROSS_ENCODERS: dict[str, Any] = {}
+
+
 def cross_encoder(model_name: str) -> "CrossEncoder":
     """모델 이름당 하나. 처음 쓸 때 올린다.
 
@@ -41,11 +42,17 @@ def cross_encoder(model_name: str) -> "CrossEncoder":
     """
     from sentence_transformers import CrossEncoder
 
-    device = embedding_device()
-    logger.info(
-        f"loading reranker {model_name} on {device or 'the default device'}"
-    )
-    return CrossEncoder(model_name, device=device, max_length=CHUNK_MAX_TOKENS)
+    def build() -> CrossEncoder:
+        device = embedding_device()
+        logger.info(
+            f"loading reranker {model_name} on "
+            f"{device or 'the default device'}"
+        )
+        return CrossEncoder(
+            model_name, device=device, max_length=CHUNK_MAX_TOKENS
+        )
+
+    return shared_model(_CROSS_ENCODERS, model_name, build)
 
 
 class CrossEncoderReranker(BaseReranker):
