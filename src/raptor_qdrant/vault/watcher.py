@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -11,10 +12,17 @@ logger = logging.getLogger(__name__)
 DEBOUNCE_SECONDS = 3.0
 # 재구축이 끝났는지 이 주기로 확인한다
 TICK_SECONDS = 15.0
+# 이만큼 안에 함께 조용해진 파일은 한 번에 묶어서 넘긴다. 거의 동시에 저장된
+# 노트를 파일 수만큼 따로 적용하면 그만큼 Qdrant 를 오간다
+SETTLE_COALESCE_SECONDS = 0.25
 
 
 class _DebouncedMarkdownHandler(FileSystemEventHandler):
-    """옵시디언은 타이핑 중에도 자주 저장한다. 파일별로 조용해질 때까지 기다린다."""
+    """옵시디언은 타이핑 중에도 자주 저장한다. 파일마다 조용해질 때까지 기다린다.
+
+    파일별로 마지막 이벤트 시각을 재고, 기한이 지난 것만 넘긴다. 타이머 하나를
+    이벤트마다 되감으면 이미 멎은 노트까지 남이 저장을 멈출 때까지 붙잡힌다.
+    """
 
     def __init__(
         self,
@@ -23,8 +31,9 @@ class _DebouncedMarkdownHandler(FileSystemEventHandler):
     ):
         self._on_settled = on_settled
         self._debounce_seconds = debounce_seconds
+        self._coalesce = min(SETTLE_COALESCE_SECONDS, debounce_seconds / 2)
         self._lock = threading.Lock()
-        self._pending: set[Path] = set()
+        self._deadlines: dict[Path, float] = {}
         self._timer: threading.Timer | None = None
 
     def on_any_event(self, event: FileSystemEvent) -> None:
@@ -35,32 +44,50 @@ class _DebouncedMarkdownHandler(FileSystemEventHandler):
 
     def _schedule(self, path: Path) -> None:
         with self._lock:
-            self._pending.add(path)
-            if self._timer:
-                self._timer.cancel()
-            self._timer = threading.Timer(self._debounce_seconds, self._fire)
-            self._timer.daemon = True
-            self._timer.start()
+            self._deadlines[path] = time.monotonic() + self._debounce_seconds
+            # 기한이 남은 파일은 그 스윕이 알아서 다시 잰다
+            if self._timer is None:
+                self._arm(self._debounce_seconds)
 
-    def _fire(self) -> None:
+    def _arm(self, delay: float) -> None:
+        self._timer = threading.Timer(max(0.0, delay), self._sweep)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _sweep(self) -> None:
+        now = time.monotonic()
+
         with self._lock:
-            settled, self._pending = self._pending, set()
             self._timer = None
+            settled = {
+                path
+                for path, deadline in self._deadlines.items()
+                if deadline - now <= self._coalesce
+            }
+            for path in settled:
+                del self._deadlines[path]
+            if self._deadlines:
+                self._arm(min(self._deadlines.values()) - now)
 
-        if not settled:
+        self._deliver(settled)
+
+    def _deliver(self, paths: set[Path]) -> None:
+        if not paths:
             return
 
         try:
-            self._on_settled(settled)
+            self._on_settled(paths)
         except Exception as e:
             logger.error(f"failed to apply vault changes: {e}")
 
     def flush(self) -> None:
         with self._lock:
-            timer, self._timer = self._timer, None
-        if timer:
-            timer.cancel()
-        self._fire()
+            if self._timer:
+                self._timer.cancel()
+            self._timer = None
+            settled, self._deadlines = set(self._deadlines), {}
+
+        self._deliver(settled)
 
 
 def _markdown_path(raw: object) -> Path | None:

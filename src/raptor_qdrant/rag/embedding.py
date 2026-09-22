@@ -1,8 +1,13 @@
 import logging
 import os
 from abc import ABC, abstractmethod
+from functools import cache
+from typing import TYPE_CHECKING
 
 from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.rag.constants import EMBEDDING_BATCH_SIZE
@@ -12,6 +17,60 @@ os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def embedding_device() -> str | None:
+    """임베딩을 올릴 장치. None 이면 라이브러리가 고른다.
+
+    비워 두면 MPS 가 있는 mac 에서 cpu 를 고른다. MPS 할당자는 노트를 이어
+    자르는 동안 드라이버 풀을 계속 키우고 empty_cache 로도 돌려주지 않는다.
+    노트 여섯 개에 12.7GB 까지 불어나는 것을 확인했고, 그래서 볼트가 조금만
+    커지면 인덱싱이 중간에 메모리 부족으로 죽는다. cpu 는 2.6 배 느리지만
+    끝까지 간다. 여유가 있으면 EMBEDDING_DEVICE=mps 로 되돌리면 된다.
+    """
+    configured = settings.EMBEDDING_DEVICE.strip()
+    if configured:
+        return configured
+
+    import torch
+
+    if torch.backends.mps.is_available():
+        return "cpu"
+    return None
+
+
+@cache
+def llama_embedding(model_name: str) -> "HuggingFaceEmbedding":
+    """LlamaIndex 가 쓰는 임베딩 핸들. 모델 이름당 하나만 만든다.
+
+    청커와 리트리버가 각자 만들면 같은 가중치가 메모리에 여러 벌 뜬다.
+    KURE-v1 한 벌이 기가바이트 단위라 벌수가 그대로 메모리다.
+    """
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+    device = embedding_device()
+    logger.info(
+        f"loading llama-index embedding handle for {model_name} "
+        f"on {device or 'the default device'}"
+    )
+    return HuggingFaceEmbedding(model_name=model_name, device=device)
+
+
+@cache
+def sentence_transformer(model_name: str) -> SentenceTransformer:
+    """가중치 한 벌. 직접 쓰는 쪽과 LlamaIndex 쪽이 같은 것을 본다.
+
+    llama-index 핸들은 안에 SentenceTransformer 를 하나 들고 있다. 그것을
+    같이 쓰면 프로세스에 가중치가 한 벌만 남는다. 따로 올리면 MPS 에서만
+    5GB 가까이 잡아먹고, 긴 노트를 의미 분할하다 메모리가 모자라 죽는다.
+    핸들 쪽 구현이 바뀌어 못 꺼내면 그때는 따로 올린다.
+    """
+    shared = getattr(llama_embedding(model_name), "_model", None)
+    if isinstance(shared, SentenceTransformer):
+        return shared
+
+    logger.info(f"loading a separate sentence-transformer for {model_name}")
+    return SentenceTransformer(model_name, device=embedding_device())
 
 
 class BaseEmbeddingModel(ABC):
@@ -41,21 +100,29 @@ class BaseEmbeddingModel(ABC):
 # https://huggingface.co/nlpai-lab/KURE-v1
 # https://huggingface.co/nlpai-lab/KoE5
 class KoreanEmbeddingModel(BaseEmbeddingModel):
-    def __init__(self, model_name: str = settings.EMBEDDING_MODEL):
-        """KoreanEmbeddingModel 초기화
+    def __init__(self, model_name: str | None = None):
+        """모델 이름만 잡아둔다. 가중치는 처음 쓸 때 올린다.
 
-        Args:
-            model_name (str, optional): 사용할 모델의 이름
+        status 나 sync --dry-run 은 임베딩을 한 번도 부르지 않는다. 엔진을
+        세울 때 기가바이트짜리 가중치부터 올리면 그 명령들이 이유 없이 느리다.
         """
-        try:
-            self.model = SentenceTransformer(model_name)
-            self._model_name = model_name
-            logger.info(f"{model_name} loaded successfully")
-        except Exception as e:
-            logger.error(f"failed to load embedding model {model_name}: {e}")
-            raise ValueError(
-                f"failed to initialize embedding model: {e}"
-            ) from e
+        self._model_name = model_name or settings.EMBEDDING_MODEL
+        self._model: SentenceTransformer | None = None
+
+    @property
+    def model(self) -> SentenceTransformer:
+        if self._model is None:
+            try:
+                self._model = sentence_transformer(self._model_name)
+                logger.info(f"{self._model_name} loaded successfully")
+            except Exception as e:
+                logger.error(
+                    f"failed to load embedding model {self._model_name}: {e}"
+                )
+                raise ValueError(
+                    f"failed to initialize embedding model: {e}"
+                ) from e
+        return self._model
 
     @property
     def model_name(self) -> str:
