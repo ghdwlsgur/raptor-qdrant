@@ -16,6 +16,7 @@ from raptor_qdrant.rag.constants import (
 from raptor_qdrant.rag.utils import resolve_token_count
 
 from .utils import (
+    RANDOM_SEED,
     gmm_soft_cluster,
     reduce_embedding_dimensions,
 )
@@ -96,6 +97,7 @@ class RaptorClustering(ClusteringAlgorithm):
                     n_neighbors=n_neighbors,
                     n_components=self.reduction_dimension,
                     metric="cosine",
+                    random_state=RANDOM_SEED,
                 ).fit_transform(global_cluster_embeddings)
 
                 local_clusters, n_local_clusters = gmm_soft_cluster(

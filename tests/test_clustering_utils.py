@@ -71,3 +71,25 @@ def test_duplicate_embeddings_each_land_in_a_cluster(monkeypatch):
     )._hierarchical_cluster(embeddings)
 
     assert [label.tolist() for label in labels] == [[0.0], [0.0], [0.0]]
+
+
+def test_reduction_is_reproducible():
+    rng = np.random.default_rng(7)
+    embeddings = rng.normal(size=(60, 32)).astype(np.float32)
+
+    first = reduce_embedding_dimensions(embeddings, dim=5)
+    second = reduce_embedding_dimensions(embeddings, dim=5)
+
+    assert np.array_equal(first, second)
+
+
+def test_clustering_is_reproducible():
+    rng = np.random.default_rng(7)
+    embeddings = rng.normal(size=(60, 32)).astype(np.float32)
+
+    def once():
+        reduced = reduce_embedding_dimensions(embeddings, dim=5)
+        labels, count = gmm_soft_cluster(reduced, 0.5)
+        return count, [label.tolist() for label in labels]
+
+    assert once() == once()
