@@ -43,6 +43,7 @@ from raptor_qdrant.rag.utils import TOKEN_COUNT_KEY, resolve_token_count
 from .base_retriever import BaseRetriever
 from .context_window import ContextWindow, assemble_context
 from .layer_mix import balance_layers
+from .reranker import BaseReranker, default_reranker, rerank
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class QdrantRetrieverConfig:
         hybrid_alpha: float = DEFAULT_HYBRID_ALPHA,
         summary_quota: int = DEFAULT_SUMMARY_QUOTA,
         candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
+        reranker: BaseReranker | None = None,
     ):
         """Retriever 설정 객체
 
@@ -72,6 +74,7 @@ class QdrantRetrieverConfig:
             hybrid_alpha (float, optional): 하이브리드 검색 가중치 (0: 키워드, 1: 벡터)
             summary_quota (int, optional): 상위 top_k 안에 남겨 둘 요약 노드 자리
             candidate_multiplier (int, optional): top_k 의 몇 배를 후보로 받아올지
+            reranker (Optional[BaseReranker], optional): 후보를 다시 줄 세울 모델
         """
         self._validate_parameters(
             max_tokens, top_k, hybrid_alpha, embedding_model, summary_quota
@@ -86,6 +89,10 @@ class QdrantRetrieverConfig:
         self.hybrid_alpha = hybrid_alpha
         self.summary_quota = min(summary_quota, top_k)
         self.candidate_multiplier = max(1, candidate_multiplier)
+        self.reranker = (
+            reranker if reranker is not None else default_reranker()
+        )
+        self.rerank_candidates = max(0, settings.RERANK_CANDIDATES)
 
     def _validate_parameters(
         self,
@@ -375,6 +382,13 @@ class QdrantRetriever(BaseRetriever):
                 query, collapse_tree, start_layer
             )
             candidates = self._live(retrieved_nodes)
+            if self.config.reranker:
+                candidates = rerank(
+                    query,
+                    candidates,
+                    self.config.reranker,
+                    self.config.rerank_candidates,
+                )
             selected = (
                 balance_layers(
                     candidates,

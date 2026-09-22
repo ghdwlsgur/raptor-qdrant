@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # 임베딩을 올릴 장치. 비우면 자동으로 고른다 (mac 에서는 cpu, 이유는
     # embedding.py 의 embedding_device 주석 참고). cuda·mps·cpu 를 직접 줄 수 있다
     EMBEDDING_DEVICE: str = ""
+    # 후보를 다시 줄 세우는 크로스 인코더. 비우면 재순위화를 하지 않는다.
+    # 질의마다 후보 전체를 채점하므로 CPU 에서는 몇 초가 붙는다
+    RERANKER_MODEL: str = ""
+    # 다시 세울 후보 수. 0 이면 받아온 후보 전부. 채점이 비싸서 여기를 줄이면
+    # 그만큼 빨라진다
+    RERANK_CANDIDATES: int = 0
 
     LLM_PROVIDER: Literal[
         "ollama",

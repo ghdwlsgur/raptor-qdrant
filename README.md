@@ -50,6 +50,16 @@ RAPTOR는 여기에 층을 하나 더 쌓는다. 비슷한 청크끼리 묶어 �
 
 `start_layer` 로 레이어를 지정하면 그 조건이 Qdrant 에 필터로 내려간다. 받아온 뒤에 거르면 그 레이어의 좋은 후보는 애초에 후보에 없다.
 
+`RERANKER_MODEL` 을 주면 고르기 전에 크로스 인코더가 후보를 다시 줄 세운다. 하이브리드 검색은 질문과 청크를 따로 벡터로 만들어 견주지만 크로스 인코더는 둘을 함께 읽는다. 그만큼 잘 맞히고 그만큼 느리다. 기본값은 꺼짐이다. 볼트 질문 45개로 잰 값이다.
+
+| 설정 | broad recall@1 | broad coverage | 질의당 |
+|---|---|---|---|
+| 끔 | 85% | 90% | 0.1초 |
+| 켬, `RERANK_CANDIDATES=16` | 90% | 91% | 3초 |
+| 켬, 후보 48개 전부 | 90% | 94% | 18~28초 |
+
+상위 한 자리 정확도는 열여섯 개만 채점해도 얻는다. coverage 는 아래쪽 후보를 끌어올려야 오르는 값이라 전부 채점해야 한다. CPU 기준이고 GPU 에서는 셈이 달라진다.
+
 ```python
 from raptor_qdrant.database.qdrant_manager import QdrantManager
 from raptor_qdrant.vault import VaultLoader
@@ -164,6 +174,9 @@ LLM이 필요한 명령은 `index`, `ask`, `sync --rebuild-tree`뿐이다. `stat
 | `COLLECTION_NAME` | `obsidian` | 기본 Qdrant 컬렉션 |
 | `STATE_DIR` | `~/.local/state/raptor-qdrant` | 빌드 락 같은 실행 상태를 두는 곳 |
 | `EMBEDDING_MODEL` | `nlpai-lab/KURE-v1` | SentenceTransformer 모델 (항상 로컬) |
+| `EMBEDDING_DEVICE` | (비움) | 비우면 자동. mac 에서는 `cpu` 를 고른다 |
+| `RERANKER_MODEL` | (비움) | 후보를 다시 줄 세울 크로스 인코더. 비우면 안 한다 |
+| `RERANK_CANDIDATES` | `0` | 다시 세울 후보 수. 0 이면 전부 |
 | `LLM_PROVIDER` | `ollama` | `ollama` · `anthropic`(=`claude`) · `openai`(=`chatgpt`) · `bedrock` |
 | `SUMMARY_MODEL` | (비움) | 요약 전용 모델. 비우면 답변 모델을 그대로 쓴다 |
 | `SUMMARY_WORKERS` | `0` | 클러스터 요약 동시 실행 수. 0이면 공급자 기본값(ollama 2, bedrock 10, claude·chatgpt 8) |
@@ -273,6 +286,7 @@ uv run mypy                # 타입 검사
 | `test_llm_factory.py` | 공급자 선택·별칭·원격 판정, 지연 생성, 오류 메시지 |
 | `test_llm_requests.py` | Claude·ChatGPT 가 보내는 요청 모양 (effort·temperature·거절 처리·OAuth) |
 | `test_layer_mix.py` | 상위 k 안에 요약 자리를 남기되 관련도 순서를 지킨다 |
+| `test_reranker.py` | 재순위화가 순서와 점수를 바꾸고 채점 상한을 지킨다 |
 | `test_chunk_merging.py` | 작은 조각을 이웃에 붙이고 큰 조각은 상한 안으로 자른다 |
 | `test_eval_report.py` | recall·MRR·coverage 집계와 정답 판정 |
 | `test_payload_scan.py` | payload 훑기가 필요한 필드만 받아 온다 |
