@@ -122,18 +122,16 @@ def test_a_chunk_under_the_cap_is_untouched():
 
 
 def test_semantic_splitting_is_off_by_default():
-    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
-
     from fakes import CountingEmbedding
+    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
 
     assert not HybridChunker(CountingEmbedding()).semantic
 
 
 def test_the_setting_turns_semantic_splitting_on(monkeypatch):
+    from fakes import CountingEmbedding
     from raptor_qdrant.core.config import settings
     from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
-
-    from fakes import CountingEmbedding
 
     monkeypatch.setattr(settings, "SEMANTIC_CHUNKING", True)
 
@@ -142,9 +140,8 @@ def test_the_setting_turns_semantic_splitting_on(monkeypatch):
 
 
 def test_a_long_section_is_cut_by_length_without_the_embedder():
-    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
-
     from fakes import CountingEmbedding
+    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
 
     model = CountingEmbedding()
     long_note = (
