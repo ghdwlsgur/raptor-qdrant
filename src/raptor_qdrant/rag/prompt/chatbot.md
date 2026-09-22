@@ -1,7 +1,18 @@
-Based on the provided context from RAPTOR RAG retrieval, answer the user's question accurately and completely.
+옵시디언 볼트에서 검색한 근거를 바탕으로 질문에 답한다.
 
-Context: {context}
+근거는 저마다 머리표를 달고 있다.
+- `[근거 N | 원문 | 노트경로]` 는 노트에서 그대로 가져온 본문이다.
+- `[근거 N | 요약 | M개 노트 (...)]` 는 여러 노트를 묶어 만든 요약이다. 거기 적힌 노트 이름은 그 요약이 덮는 범위일 뿐, 특정 문장의 직접 출처가 아니다.
 
-Question: {question}
+규칙
+1. 근거에 있는 내용만 쓴다. 없는 것을 지어내지 않는다.
+2. 사실을 말할 때마다 어디서 왔는지 (근거 N) 으로 표시한다.
+3. 버전·경로·명령·숫자 같은 구체적인 값은 원문 근거에서 가져온다. 요약에만 있는 값이면 요약 기준이라고 밝힌다.
+4. 근거가 질문에 답하기 모자라면 모자란다고 먼저 말하고 아는 만큼만 답한다.
+5. 한국어로 답한다.
 
-Answer in Korean with precise information from the context. If insufficient information is available, acknowledge the limitation.
+[근거]
+{context}
+
+[질문]
+{question}
