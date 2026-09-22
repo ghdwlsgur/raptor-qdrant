@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from collections.abc import Iterable, Mapping
@@ -9,6 +10,8 @@ from raptor_qdrant.database.qdrant_manager import QdrantManager
 from raptor_qdrant.rag.constants import (
     CONTENT_HASH_KEY,
     SOURCE_KEY,
+    SOURCE_SET_KEY,
+    STALE_KEY,
     TREE_DRIFT_WARN_RATIO,
     TREE_GENERATION_KEY,
 )
@@ -20,7 +23,8 @@ from .builder.cluster.cluster_builder import (
 )
 from .builder.models.structure import Node
 from .embedding import BaseEmbeddingModel, KoreanEmbeddingModel
-from .llm import BaseChatbotModel, create_chatbot
+from .llm import BaseChatbotModel, LazyChatbot
+from .retriever.context_window import ordered_sources
 from .retriever.qdrant_retriever import (
     QdrantRetriever,
     QdrantRetrieverConfig,
@@ -30,6 +34,18 @@ logger = logging.getLogger(__name__)
 
 NO_CONTEXT_MESSAGE = "no relevant context found to answer the question."
 LEAF_LAYER = 0
+# llama-index 는 본문을 평평한 text 필드가 아니라 이 JSON 안에 넣는다
+NODE_CONTENT_KEY = "_node_content"
+
+
+def _stored_text(payload: dict[str, Any]) -> str:
+    raw = payload.get(NODE_CONTENT_KEY)
+    if not isinstance(raw, str):
+        return ""
+    try:
+        return str(json.loads(raw).get("text", ""))
+    except (ValueError, TypeError):
+        return ""
 
 
 @dataclass(frozen=True)
@@ -40,6 +56,7 @@ class IndexHealth:
     summary_nodes: int
     leaves_outside_tree: int
     generations: int = 0
+    stale_summaries: int = 0
 
     @property
     def drift(self) -> float:
@@ -65,6 +82,8 @@ class IndexHealth:
         )
         if self.has_mixed_generations:
             text += f", {self.generations} tree generations mixed"
+        if self.stale_summaries:
+            text += f", {self.stale_summaries} summaries retired"
         return text
 
 
@@ -81,11 +100,7 @@ class QueryResult:
 
     @property
     def sources(self) -> list[str]:
-        ordered: dict[str, None] = {}
-        for chunk in self.chunks:
-            for source in chunk.get("sources") or []:
-                ordered.setdefault(source, None)
-        return list(ordered)
+        return ordered_sources(self.chunks)
 
 
 class EngineConfig:
@@ -95,12 +110,15 @@ class EngineConfig:
         embedding_model: BaseEmbeddingModel | None = None,
         summarization_model: BaseSummarizationModel | None = None,
         llm: BaseChatbotModel | None = None,
+        provider: str | None = None,
     ):
         if not collection_name:
             raise ValueError("collection_name must be provided and non-empty")
 
+        self.provider = provider
         self.embedding_model = embedding_model or KoreanEmbeddingModel()
-        self.llm = llm or create_chatbot()
+        # 잎만 갱신하거나 현황만 보는 명령은 LLM 을 한 번도 부르지 않는다
+        self.llm = llm or LazyChatbot(provider)
         self.summarization_model = summarization_model or LLMSummarizer(
             self.llm
         )
@@ -116,6 +134,7 @@ class EngineConfig:
             },
             cluster_embedding_model=settings.EMBEDDING_MODEL_STRING,
             summarization_model=self.summarization_model,
+            provider=provider,
         )
 
 
@@ -286,15 +305,64 @@ class RaptorEngine:
         )
 
     def remove_notes(self, paths: Iterable[str]) -> int:
-        """삭제된 노트의 포인트를 즉시 제거하고 제거한 개수를 반환한다."""
-        return sum(self.delete_document(path) for path in paths)
+        """삭제된 노트의 포인트를 제거하고, 그 노트를 덮던 요약을 빼둔다."""
+        removed = 0
+        retired = 0
+        for path in paths:
+            removed += self.delete_document(path)
+            retired += self.retire_summaries_of(path)
+
+        if retired:
+            logger.info(
+                f"{retired} summary nodes covered deleted notes and were "
+                "taken out of search until the next rebuild"
+            )
+        return removed
+
+    def retire_summaries_of(self, path: str) -> int:
+        """지워진 노트를 덮던 요약을 검색에서 빼둔다.
+
+        요약은 원문이 사라져도 그 내용을 그대로 물고 있다. 낡은 것과 없는
+        것은 다르다. 재구축 전까지 이 요약이 없는 노트를 근거로 내놓지
+        않도록 표시해 둔다.
+        """
+        return self.manager.set_payload_where(
+            self.collection_name, SOURCE_SET_KEY, path, {STALE_KEY: True}
+        )
+
+    def summaries_covering_many(
+        self, minimum: int = 1
+    ) -> list[tuple[str, list[str]]]:
+        """요약 노드의 본문과 그것이 덮는 노트 목록.
+
+        평가셋이 트리를 겨냥한 질문을 만들 때 쓴다. 요약이 묶어 둔 노트
+        집합이 곧 "이 질문에 나와야 할 것들"의 정답지가 된다.
+        """
+        found: list[tuple[str, list[str]]] = []
+
+        for payload in self.manager.iter_payloads(
+            self.collection_name,
+            fields=("layer", NODE_CONTENT_KEY, SOURCE_SET_KEY, STALE_KEY),
+        ):
+            if not payload.get("layer") or payload.get(STALE_KEY):
+                continue
+
+            sources = payload.get(SOURCE_SET_KEY) or []
+            text = _stored_text(payload)
+            if text and len(sources) >= minimum:
+                found.append((text, list(sources)))
+
+        return found
 
     def drift(self) -> IndexHealth:
         """요약 레이어가 현재 잎 집합을 얼마나 반영하는지 계산한다."""
-        leaves = summaries = orphan_leaves = 0
+        leaves = summaries = orphan_leaves = stale = 0
         generations: set[str] = set()
 
-        for payload in self.manager.iter_payloads(self.collection_name):
+        for payload in self.manager.iter_payloads(
+            self.collection_name,
+            fields=("layer", TREE_GENERATION_KEY, STALE_KEY),
+        ):
             generation = payload.get(TREE_GENERATION_KEY)
             if generation is not None:
                 generations.add(generation)
@@ -304,12 +372,15 @@ class RaptorEngine:
                     orphan_leaves += 1
             else:
                 summaries += 1
+                if payload.get(STALE_KEY):
+                    stale += 1
 
         return IndexHealth(
             leaf_nodes=leaves,
             summary_nodes=summaries,
             leaves_outside_tree=orphan_leaves,
             generations=len(generations),
+            stale_summaries=stale,
         )
 
     @staticmethod
@@ -326,7 +397,9 @@ class RaptorEngine:
     def indexed_content_hashes(self) -> dict[str, str]:
         """적재된 문서별 내용 해시를 반환한다. 증분 판단의 기준이다."""
         hashes: dict[str, str] = {}
-        for point in self.manager.iter_payloads(self.collection_name):
+        for point in self.manager.iter_payloads(
+            self.collection_name, fields=(SOURCE_KEY, CONTENT_HASH_KEY)
+        ):
             name = point.get(SOURCE_KEY)
             digest = point.get(CONTENT_HASH_KEY)
             if name and digest:

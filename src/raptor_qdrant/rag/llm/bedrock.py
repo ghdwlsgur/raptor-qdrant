@@ -14,7 +14,6 @@ from raptor_qdrant.rag.constants import (
     BEDROCK_TEMPERATURE,
 )
 from raptor_qdrant.rag.llm.base import BaseChatbotModel
-from raptor_qdrant.rag.utils import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +23,8 @@ logger = logging.getLogger(__name__)
 class AmazonBedrock(BaseChatbotModel):
     def __init__(
         self,
-        model_id: str = settings.BEDROCK_MODEL_ID,
-        region: str = settings.AWS_REGION,
+        model_id: str | None = None,
+        region: str | None = None,
         max_tokens: int = BEDROCK_MAX_TOKENS,
         temperature: float = BEDROCK_TEMPERATURE,
     ):
@@ -37,8 +36,8 @@ class AmazonBedrock(BaseChatbotModel):
             max_tokens (int, optional): 모델이 생성할 수 있는 최대 토큰 수
             temperature (float, optional): 답변의 창의성 파라미터
         """
-        self.model_id = model_id
-        self.region = region
+        self.model_id = model_id or settings.BEDROCK_MODEL_ID
+        self.region = region or settings.AWS_REGION
         self.max_tokens = max_tokens
         self.temperature = temperature
 
@@ -67,19 +66,14 @@ class AmazonBedrock(BaseChatbotModel):
     def describe(self) -> str:
         return f"AmazonBedrock({self.model_id})"
 
-    def _create_prompt(self, context: str, question: str) -> list:
-        prompt_template = load_prompt("prompt/chatbot.md")
-        formatted_prompt = prompt_template.format(
-            context=context, question=question
-        )
-
+    def _create_prompt(self, prompt: str) -> list:
         return [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": formatted_prompt,
+                        "text": prompt,
                     }
                 ],
             }
@@ -91,8 +85,8 @@ class AmazonBedrock(BaseChatbotModel):
         ),  # 실패 시 1초에서 10초 사이의 랜덤한 시간(지수 분포)을 기다린 후 재시도
         stop=stop_after_attempt(3),  # 최대 3번까지 재시도
     )
-    def answer(self, context: str, question: str) -> str:
-        messages = self._create_prompt(context, question)
+    def complete(self, prompt: str) -> str:
+        messages = self._create_prompt(prompt)
 
         body = json.dumps(
             {

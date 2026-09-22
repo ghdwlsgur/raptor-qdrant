@@ -9,8 +9,23 @@ from pathlib import Path
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.core.logger import configure_logging
 from raptor_qdrant.database.qdrant_manager import QdrantManager
+from raptor_qdrant.eval import (
+    build_cases,
+    dataset_path,
+    load_cases,
+    save_cases,
+)
+from raptor_qdrant.eval.dataset import build_broad_cases
+from raptor_qdrant.eval.report import outcome_of, score
 from raptor_qdrant.rag.engine import EngineConfig, QueryResult, RaptorEngine
-from raptor_qdrant.rag.llm import BaseChatbotModel, create_chatbot
+from raptor_qdrant.rag.llm import (
+    BaseChatbotModel,
+    accepted_providers,
+    configured_model,
+    create_chatbot,
+    is_remote_provider,
+    normalize_provider,
+)
 from raptor_qdrant.rag.summarizer import LLMSummarizer
 from raptor_qdrant.vault import (
     BuildLock,
@@ -25,7 +40,6 @@ from raptor_qdrant.vault import (
 logger = logging.getLogger(__name__)
 
 LLAMA_INDEX_CACHE_DIR = "/tmp/llama_index_cache"
-REMOTE_PROVIDERS = frozenset({"bedrock"})
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--llm",
-        choices=["ollama", "bedrock"],
+        choices=accepted_providers(),
         default=None,
         help=f"LLM 공급자 (기본: {settings.LLM_PROVIDER})",
     )
@@ -72,13 +86,29 @@ def parse_args() -> argparse.Namespace:
     )
     watch.add_argument("--vault", default=settings.VAULT_PATH)
     watch.add_argument("--debounce", type=float, default=3.0)
-    watch.add_argument("--allow-remote-llm", action="store_true")
 
     ask = commands.add_parser("ask", help="적재된 내용에 질문한다")
     ask.add_argument("question")
     ask.add_argument("--show-chunks", type=int, default=3)
 
     commands.add_parser("status", help="컬렉션에 무엇이 들어 있는지 보여준다")
+
+    evaluate = commands.add_parser(
+        "eval", help="질문 모음으로 검색 성적을 잰다"
+    )
+    evaluate.add_argument(
+        "--build",
+        action="store_true",
+        help="볼트에서 질문을 새로 만들어 평가셋을 저장한다 (LLM 을 쓴다)",
+    )
+    evaluate.add_argument("--questions", type=int, default=25)
+    evaluate.add_argument(
+        "--broad",
+        action="store_true",
+        help="요약 노드에서 노트를 가로지르는 질문을 만든다",
+    )
+    evaluate.add_argument("--vault", default=settings.VAULT_PATH)
+    evaluate.add_argument("--allow-remote-llm", action="store_true")
 
     return parser.parse_args()
 
@@ -95,10 +125,9 @@ def ready_chatbot(
 
 
 def summary_model_override(provider: str | None) -> str | None:
-    """요약에 답변 모델과 다른 Ollama 모델을 쓰기로 했으면 그 이름."""
-    name = (provider or settings.LLM_PROVIDER).strip().lower()
-    wanted = settings.OLLAMA_SUMMARY_MODEL.strip()
-    if name == "ollama" and wanted and wanted != settings.OLLAMA_MODEL:
+    """요약에 답변 모델과 다른 모델을 쓰기로 했으면 그 이름."""
+    wanted = settings.SUMMARY_MODEL.strip()
+    if wanted and wanted != configured_model(provider):
         return wanted
     return None
 
@@ -115,8 +144,8 @@ def ready_summarizer(
 
 def guard_remote_llm(provider: str | None, allowed: bool) -> bool:
     """볼트 본문을 원격으로 보내기 전에 명시적 동의를 요구한다."""
-    name = (provider or settings.LLM_PROVIDER).lower()
-    if name in REMOTE_PROVIDERS and not allowed:
+    name = normalize_provider(provider)
+    if is_remote_provider(provider) and not allowed:
         logger.error(
             f"'{name}' is a remote provider and vault notes would be sent to "
             "it. pass --allow-remote-llm if that is intended, or use ollama"
@@ -347,6 +376,61 @@ def run_ask(engine: RaptorEngine, args: argparse.Namespace) -> int:
     return 0
 
 
+def run_eval(engine: RaptorEngine, args: argparse.Namespace) -> int:
+    """평가셋으로 검색을 재고 결과를 출력한다."""
+    path = dataset_path(engine.collection_name)
+
+    if args.build:
+        fresh = (
+            build_broad_cases(
+                engine.summaries_covering_many(), engine.llm, args.questions
+            )
+            if args.broad
+            else build_cases(
+                load_vault(args.vault)[1], engine.llm, args.questions
+            )
+        )
+        if not fresh:
+            logger.error("could not build any questions")
+            return 1
+
+        # 같은 종류만 갈아끼운다. broad 를 만들 때 note 질문까지 날리면
+        # 두 자를 나란히 놓고 볼 수 없다
+        kind = fresh[0].kind
+        kept = [
+            case
+            for case in (load_cases(path) if path.is_file() else [])
+            if case.kind != kind
+        ]
+        save_cases(kept + fresh, path)
+        print(f"{kind} 질문 {len(fresh)}개를 {path} 에 저장했다")
+
+    cases = load_cases(path)
+    outcomes = [
+        outcome_of(
+            case.question,
+            case.sources,
+            engine.retrieve(case.question)[1],
+            case.kind,
+        )
+        for case in cases
+    ]
+    report = score(outcomes, engine.config.retriever_config.max_tokens)
+
+    print(f"\n전체  {report.summary()}")
+    for kind in ("note", "broad"):
+        part = report.of_kind(kind)
+        if part.total:
+            print(f"{kind:<5} {part.summary()}")
+
+    if report.misses:
+        print(f"\n놓친 질문 {len(report.misses)}개:")
+        for miss in report.misses[:10]:
+            print(f"  {miss.question[:58]}")
+            print(f"    정답: {', '.join(miss.sources[:3])}")
+    return 0
+
+
 def run_status(engine: RaptorEngine, _: argparse.Namespace) -> int:
     documents = engine.list_documents()
     health = engine.drift()
@@ -387,19 +471,38 @@ COMMANDS = {
     "watch": run_watch,
     "ask": run_ask,
     "status": run_status,
+    "eval": run_eval,
 }
 
-NEEDS_VAULT_GUARD = frozenset({"index", "sync", "watch"})
+NEEDS_VAULT_GUARD = frozenset({"index", "sync", "eval"})
+
+
+def needs_llm(args: argparse.Namespace) -> bool:
+    """요약이나 답변을 실제로 돌리는 명령인가.
+
+    잎만 갈아끼우는 sync·watch 와 현황만 읽는 status 는 LLM 을 한 번도 부르지
+    않는다. 그런 명령이 쓰지도 않을 모델 때문에 못 돌면 그 자체로 고장이다.
+    """
+    if args.command in {"index", "ask"}:
+        return True
+    if args.command == "sync":
+        return args.rebuild_tree
+    # 평가셋을 만들 때만 LLM 이 필요하다. 재는 것은 검색만으로 끝난다
+    return args.command == "eval" and args.build
 
 
 def main() -> int:
     args = parse_args()
 
-    os.environ["LLAMA_INDEX_CACHE_DIR"] = LLAMA_INDEX_CACHE_DIR
+    # Dockerfile 처럼 이미 잡아둔 값이 있으면 그것을 쓴다. 덮어쓰면 캐시가
+    # 영속 볼륨 대신 컨테이너 안 /tmp 로 떨어진다
+    os.environ.setdefault("LLAMA_INDEX_CACHE_DIR", LLAMA_INDEX_CACHE_DIR)
     configure_logging()
 
-    if args.command in NEEDS_VAULT_GUARD and not guard_remote_llm(
-        args.llm, args.allow_remote_llm
+    if (
+        args.command in NEEDS_VAULT_GUARD
+        and needs_llm(args)
+        and not guard_remote_llm(args.llm, args.allow_remote_llm)
     ):
         return 1
 
@@ -409,18 +512,22 @@ def main() -> int:
         logger.error(f"cannot reach Qdrant: {e}")
         return 1
 
-    try:
-        llm = ready_chatbot(args.llm)
-        summarizer = ready_summarizer(args.llm, llm)
-    except Exception as e:
-        logger.error(f"LLM is not usable: {e}")
-        return 1
+    llm: BaseChatbotModel | None = None
+    summarizer: LLMSummarizer | None = None
+    if needs_llm(args):
+        try:
+            llm = ready_chatbot(args.llm)
+            summarizer = ready_summarizer(args.llm, llm)
+        except Exception as e:
+            logger.error(f"LLM is not usable: {e}")
+            return 1
 
     engine = RaptorEngine(
         EngineConfig(
             collection_name=args.collection,
             llm=llm,
             summarization_model=summarizer,
+            provider=args.llm,
         )
     )
 

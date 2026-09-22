@@ -20,12 +20,19 @@ services:
       qdrant:
         condition: service_healthy
     environment:
-      QDRANT_HOST: qdrant
-      QDRANT_PORT: 6333
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # 값 없이 이름만 적으면 호스트에 있을 때만 넘어간다. 빈 문자열을 넣으면
+      # SDK 가 그것을 키로 알고 401 을 받는다
+      - ANTHROPIC_API_KEY
+      - ANTHROPIC_MODEL
+      - OPENAI_API_KEY
+      - OPENAI_MODEL
+      - SUMMARY_MODEL
     volumes:
       - model-cache:/models
       - ./data:/app/data:ro

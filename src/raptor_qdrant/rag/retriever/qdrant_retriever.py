@@ -8,35 +8,49 @@ from llama_index.core.base.base_retriever import (
     BaseRetriever as LlamaBaseRetriever,
 )
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
-from llama_index.core.vector_stores.types import VectorStoreQueryMode
+from llama_index.core.vector_stores.types import (
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+    VectorStoreQueryMode,
+)
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 
 from raptor_qdrant.core.config import settings
 from raptor_qdrant.database.qdrant_manager import QdrantManager
 from raptor_qdrant.rag.builder.models.structure import Node, Tree
 from raptor_qdrant.rag.constants import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_CANDIDATE_MULTIPLIER,
     DEFAULT_COLLECTION_NAME,
     DEFAULT_HYBRID_ALPHA,
     DEFAULT_MAX_TOKENS,
+    DEFAULT_SOURCE_EXPANSION,
+    DEFAULT_SUMMARY_QUOTA,
     DEFAULT_TOP_K,
     SOURCE_KEY,
+    SOURCE_SET_KEY,
+    STALE_KEY,
     TREE_GENERATION_KEY,
 )
 from raptor_qdrant.rag.embedding import (
     BaseEmbeddingModel,
     KoreanEmbeddingModel,
+    llama_embedding,
 )
 from raptor_qdrant.rag.utils import TOKEN_COUNT_KEY, resolve_token_count
 
 from .base_retriever import BaseRetriever
 from .context_window import ContextWindow, assemble_context
+from .layer_mix import balance_layers
+from .reranker import BaseReranker, default_reranker, rerank
 
 logger = logging.getLogger(__name__)
 
-TEXT_PAYLOAD_FIELD = "text"
+LAYER_KEY = "layer"
+LEAF_LAYER = 0
 
 Payload = Mapping[str, Any]
 
@@ -49,6 +63,10 @@ class QdrantRetrieverConfig:
         top_k: int = DEFAULT_TOP_K,
         collection_name: str = DEFAULT_COLLECTION_NAME,
         hybrid_alpha: float = DEFAULT_HYBRID_ALPHA,
+        summary_quota: int = DEFAULT_SUMMARY_QUOTA,
+        candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
+        reranker: BaseReranker | None = None,
+        source_expansion: int = DEFAULT_SOURCE_EXPANSION,
     ):
         """Retriever 설정 객체
 
@@ -58,9 +76,12 @@ class QdrantRetrieverConfig:
             top_k (int, optional): DB에서 검색할 가장 유사한 문서 개수
             collection_name (str, optional): Qdrant 컬렉션 이름
             hybrid_alpha (float, optional): 하이브리드 검색 가중치 (0: 키워드, 1: 벡터)
+            summary_quota (int, optional): 상위 top_k 안에 남겨 둘 요약 노드 자리
+            candidate_multiplier (int, optional): top_k 의 몇 배를 후보로 받아올지
+            reranker (Optional[BaseReranker], optional): 후보를 다시 줄 세울 모델
         """
         self._validate_parameters(
-            max_tokens, top_k, hybrid_alpha, embedding_model
+            max_tokens, top_k, hybrid_alpha, embedding_model, summary_quota
         )
 
         self.top_k = top_k
@@ -70,7 +91,13 @@ class QdrantRetrieverConfig:
         self.collection_name = collection_name
         # 0에 가까울 수록 텍스트 유사도 기반 검색, 1에 가까울 수록 의미 기반 검색
         self.hybrid_alpha = hybrid_alpha
-        self.vector_size = self.embedding_model.embedding_dimension
+        self.summary_quota = min(summary_quota, top_k)
+        self.candidate_multiplier = max(1, candidate_multiplier)
+        self.reranker = (
+            reranker if reranker is not None else default_reranker()
+        )
+        self.rerank_candidates = max(0, settings.RERANK_CANDIDATES)
+        self.source_expansion = max(0, source_expansion)
 
     def _validate_parameters(
         self,
@@ -78,11 +105,14 @@ class QdrantRetrieverConfig:
         top_k: int,
         hybrid_alpha: float,
         embedding_model: BaseEmbeddingModel | None,
+        summary_quota: int = 0,
     ) -> None:
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
+        if summary_quota < 0:
+            raise ValueError("summary_quota must not be negative")
         if not 0.0 <= hybrid_alpha <= 1.0:
             raise ValueError("hybrid_alpha must be between 0.0 and 1.0")
 
@@ -92,6 +122,15 @@ class QdrantRetrieverConfig:
             raise ValueError(
                 "embedding_model must be an instance of BaseEmbeddingModel"
             )
+
+    @property
+    def candidate_pool(self) -> int:
+        """레이어를 섞으려면 top_k 보다 넉넉히 받아 와야 한다."""
+        return self.top_k * self.candidate_multiplier
+
+    @property
+    def vector_size(self) -> int:
+        return self.embedding_model.embedding_dimension
 
     @property
     def vector_store_config(self) -> dict[str, Any]:
@@ -124,9 +163,7 @@ class QdrantRetriever(BaseRetriever):
         if self._llama_embed_model is None:
             try:
                 model_id = self.embedding_model.model_name
-                self._llama_embed_model = HuggingFaceEmbedding(
-                    model_name=model_id
-                )
+                self._llama_embed_model = llama_embedding(model_id)
                 logger.debug(f"embedding model loaded: {model_id}")
             except Exception as e:
                 logger.error(
@@ -158,15 +195,93 @@ class QdrantRetriever(BaseRetriever):
                 )
                 logger.debug("loaded existing collection")
 
-            self.retriever = self.index.as_retriever(
-                similarity_top_k=self.config.top_k,
-                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
-                alpha=self.config.hybrid_alpha,
-            )
+            self.retriever = self._build_retriever()
             logger.debug("retriever initialized successfully")
         except Exception as e:
             logger.error(f"failed to initialize retriever: {e}")
             raise
+
+    def _build_retriever(
+        self, filters: MetadataFilters | None = None
+    ) -> LlamaBaseRetriever:
+        assert self.index is not None
+        return self.index.as_retriever(
+            similarity_top_k=self.config.candidate_pool,
+            vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+            alpha=self.config.hybrid_alpha,
+            filters=filters,
+        )
+
+    @staticmethod
+    def _layer_filter(layer: int) -> MetadataFilters:
+        return MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key=LAYER_KEY, value=layer, operator=FilterOperator.EQ
+                )
+            ]
+        )
+
+    def _candidates(
+        self, query: str, collapse_tree: bool, start_layer: int | None
+    ) -> list[NodeWithScore]:
+        """후보를 받아온다. 레이어 지정은 Qdrant 에 필터로 내려보낸다.
+
+        받아온 뒤에 레이어로 거르면 그 레이어의 좋은 후보는 애초에 후보에
+        없다. 상위 마흔 개가 전부 잎이면 start_layer=2 는 빈손으로 끝난다.
+        """
+        if collapse_tree or start_layer is None:
+            if self.retriever is None:
+                self._initialize_retriever()
+            assert self.retriever is not None
+            return self.retriever.retrieve(query)
+
+        if self.index is None:
+            self._initialize_retriever()
+        return self._build_retriever(self._layer_filter(start_layer)).retrieve(
+            query
+        )
+
+    def _expand_sources(
+        self, query: str, selected: list[NodeWithScore]
+    ) -> list[NodeWithScore]:
+        """걸린 요약이 덮는 노트에서 원문을 더 끌어온다.
+
+        요약은 자기가 덮는 노트 이름을 전부 달고 있어서 검색 성적표에는
+        잘 찍힌다. 그런데 답을 쓰려면 이름이 아니라 문장이 필요하다. 실측으로
+        노트를 가로지르는 질문에서 정답 노트의 34% 만 원문으로 들어왔다.
+        요약이 가리키는 노트로 범위를 좁혀 질문과 가까운 원문을 더 가져온다.
+        """
+        covered: set[str] = set()
+        for node in selected:
+            if node.metadata.get(LAYER_KEY):
+                covered.update(node.metadata.get(SOURCE_SET_KEY) or [])
+
+        already = {
+            node.metadata.get(SOURCE_KEY)
+            for node in selected
+            if not node.metadata.get(LAYER_KEY)
+        }
+        wanted = sorted(covered - already)
+        if not wanted:
+            return []
+
+        filters = MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key=SOURCE_KEY, value=wanted, operator=FilterOperator.IN
+                ),
+                MetadataFilter(
+                    key=LAYER_KEY, value=LEAF_LAYER, operator=FilterOperator.EQ
+                ),
+            ]
+        )
+        found = self._build_retriever(filters).retrieve(query)
+        return self._live(found)[: self.config.source_expansion]
+
+    @staticmethod
+    def _live(nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+        return [node for node in nodes if not node.metadata.get(STALE_KEY)]
 
     def _text_node(
         self,
@@ -200,34 +315,6 @@ class QdrantRetriever(BaseRetriever):
             embedding=node.embeddings[self.config.embedding_model_string],
             metadata=metadata,
         )
-
-    def _should_include_node(
-        self,
-        node: NodeWithScore,
-        collapse_tree: bool,
-        start_layer: int | None,
-    ) -> bool:
-        if collapse_tree or start_layer is None:
-            return True
-
-        return node.metadata.get("layer") == start_layer
-
-    def _create_keyword_search_index(self) -> None:
-        try:
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name=TEXT_PAYLOAD_FIELD,
-                field_schema=models.TextIndexParams(
-                    type=models.TextIndexType.TEXT,
-                    tokenizer=models.TokenizerType.MULTILINGUAL,
-                    lowercase=True,
-                ),
-            )
-        except Exception as e:
-            if "already exists" in str(e).lower():
-                logger.debug("full-text index already exists for 'text' field")
-            else:
-                logger.warning(f"failed to create text index: {e}")
 
     def add_nodes(
         self,
@@ -265,7 +352,6 @@ class QdrantRetriever(BaseRetriever):
         self.index = VectorStoreIndex.from_vector_store(
             self._get_vector_store()
         )
-        self._create_keyword_search_index()
         self._initialize_retriever()
 
     def retire_generations_except(self, generation: str) -> int:
@@ -334,18 +420,30 @@ class QdrantRetriever(BaseRetriever):
             raise ValueError("query must be a non-empty string")
 
         try:
-            if self.retriever is None:
-                self._initialize_retriever()
-            assert self.retriever is not None
+            retrieved_nodes = self._candidates(
+                query, collapse_tree, start_layer
+            )
+            candidates = self._live(retrieved_nodes)
+            if self.config.reranker:
+                candidates = rerank(
+                    query,
+                    candidates,
+                    self.config.reranker,
+                    self.config.rerank_candidates,
+                )
+            selected = (
+                balance_layers(
+                    candidates,
+                    self.config.top_k,
+                    self.config.summary_quota,
+                )
+                if collapse_tree
+                else candidates[: self.config.top_k]
+            )
+            if self.config.source_expansion and collapse_tree:
+                selected = selected + self._expand_sources(query, selected)
 
-            retrieved_nodes = self.retriever.retrieve(query)
-            eligible_nodes = [
-                node
-                for node in retrieved_nodes
-                if self._should_include_node(node, collapse_tree, start_layer)
-            ]
-
-            window = assemble_context(eligible_nodes, self.config.max_tokens)
+            window = assemble_context(selected, self.config.max_tokens)
             self._log_window(window, len(retrieved_nodes))
 
             return window.text, window.chunk_info

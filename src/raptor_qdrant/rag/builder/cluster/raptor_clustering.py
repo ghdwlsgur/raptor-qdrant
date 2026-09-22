@@ -53,18 +53,18 @@ class RaptorClustering(ClusteringAlgorithm):
     def _hierarchical_cluster(
         self, embeddings: np.ndarray
     ) -> list[np.ndarray]:
-        """각 임베딩이 어떤 클러스터에 속하는지를 나타내는 인덱스 배열의 리스트를 반환"""
+        """각 임베딩이 어떤 클러스터에 속하는지를 나타내는 인덱스 배열의 리스트를 반환
 
-        # 원본 임베딩과 인덱스를 미리 딕셔너리로 매핑해 둡니다.
-        # NumPy 배열은 해시가 불가능하므로 튜플로 변환합니다.
-        embedding_to_idx = {tuple(emb): i for i, emb in enumerate(embeddings)}
-
+        자리(위치 인덱스)를 들고 다닌다. 임베딩 값을 키로 원래 자리를 되찾으려
+        하면 1024 차원짜리 튜플을 노드 수만큼 쥐고 있어야 하고(잎 만 개면
+        수백 MB), 값이 똑같은 노드 둘은 한 자리로 뭉개져 한쪽이 어느
+        클러스터에도 못 들어간 채 상위 레이어에서 조용히 빠진다.
+        """
         # 전체 임베딩의 차원을 축소하여 전체 구조 파악
         global_reduced_embeddings = reduce_embedding_dimensions(
             embeddings, min(self.reduction_dimension, len(embeddings) - 2)
         )
-        # 차원이 축소된 임베딩을 사용해 그룹으로 묶음
-        # 모든 embeddings를 대상으로 전체적인 분포를 파악하여 n_global_clusters개의 클러스터로 나눔
+        # 차원이 축소된 임베딩을 사용해 전체적인 분포를 n_global_clusters 개로 나눔
         global_clusters, n_global_clusters = gmm_soft_cluster(
             global_reduced_embeddings, self.threshold
         )
@@ -77,65 +77,43 @@ class RaptorClustering(ClusteringAlgorithm):
 
         # 각 Global 클러스터를 순회하며 내부를 더 작은 클러스터로 세분화
         for i in range(n_global_clusters):
-            # 현재 Global 클러스터에 속한 원본(고차원) 임베딩들을 추출
-            indices_in_global_cluster = np.array(
-                [i in gc for gc in global_clusters]
-            )
-            global_cluster_embeddings_ = embeddings[indices_in_global_cluster]
-
-            if len(global_cluster_embeddings_) == 0:
+            positions = np.flatnonzero([i in gc for gc in global_clusters])
+            if positions.size == 0:
                 continue
 
+            global_cluster_embeddings = embeddings[positions]
+
             # Global 클러스터가 너무 작으면 Local 클러스터링을 생략하고 단일 클러스터로 처리
-            if len(global_cluster_embeddings_) <= self.reduction_dimension + 1:
-                local_clusters = [
-                    np.array([0]) for _ in global_cluster_embeddings_
-                ]
+            if len(positions) <= self.reduction_dimension + 1:
+                local_clusters = [np.array([0])] * len(positions)
                 n_local_clusters = 1
             else:
-                # Local 클러스터링을 위해 현재 Global 클러스터 내의 임베딩들만 차원 축소 및 GMM 수행
                 # n_neighbors를 데이터 크기에 맞게 동적으로 설정
                 n_neighbors = max(
-                    2,
-                    min(
-                        UMAP_LOCAL_MAX_NEIGHBORS,
-                        len(global_cluster_embeddings_) - 1,
-                    ),
+                    2, min(UMAP_LOCAL_MAX_NEIGHBORS, len(positions) - 1)
                 )
                 reduced_embeddings_local = umap.UMAP(
                     n_neighbors=n_neighbors,
                     n_components=self.reduction_dimension,
                     metric="cosine",
-                ).fit_transform(global_cluster_embeddings_)
+                ).fit_transform(global_cluster_embeddings)
 
                 local_clusters, n_local_clusters = gmm_soft_cluster(
                     reduced_embeddings_local, self.threshold
                 )
 
-            # Local 클러스터링 결과를 전체 데이터의 인덱스에 맞게 다시 매핑
+            # Local 클러스터링 결과를 전체 데이터의 자리에 다시 매핑
             for j in range(n_local_clusters):
-                # 현재 Local 클러스터에 속한 임베딩들을 추출
-                indices_in_local_cluster = np.array(
-                    [j in lc for lc in local_clusters]
-                )
-                local_cluster_embeddings_ = global_cluster_embeddings_[
-                    indices_in_local_cluster
+                members = positions[
+                    np.flatnonzero([j in lc for lc in local_clusters])
                 ]
-
-                # 원본 embeddings 배열에서 위에서 찾은 임베딩들의 원래 인덱스를 찾음
-                # 복잡한 np.where 대신 딕셔너리에서 빠르게 인덱스를 조회합니다.
-                indices = [
-                    embedding_to_idx[tuple(emb)]
-                    for emb in local_cluster_embeddings_
-                ]
-
-                for idx in indices:
+                for position in members:
                     # 중복되지 않는 고유한 클러스터 ID를 부여
-                    all_local_clusters[idx] = np.append(
-                        all_local_clusters[idx], j + total_clusters
+                    all_local_clusters[position] = np.append(
+                        all_local_clusters[position], j + total_clusters
                     )
 
-            # 다음 Global 클러스터를 처리할 때 클러스터 ID가 중복되지 않도록 offset 업데이트
+            # 다음 Global 클러스터의 ID가 겹치지 않도록 offset 업데이트
             total_clusters += n_local_clusters
 
         logger.info(f"total local clusters found: {total_clusters}")

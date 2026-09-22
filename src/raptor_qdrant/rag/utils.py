@@ -9,7 +9,13 @@ from raptor_qdrant.rag.constants import DEFAULT_ENCODING
 TOKEN_COUNT_KEY = "token_count"
 
 
+@cache
 def load_prompt(filename: str) -> str:
+    """프롬프트 파일. 프로세스당 한 번만 읽는다.
+
+    호출마다 디스크를 보면 몇 시간 도는 빌드가 도중에 바뀐 프롬프트를
+    집어삼킨다. 실제로 그렇게 요약 레이어 하나를 통째로 버렸다.
+    """
     current_dir = Path(__file__).parent
 
     with open(current_dir / filename, encoding="utf-8") as file:

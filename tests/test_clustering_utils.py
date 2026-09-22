@@ -51,3 +51,23 @@ def test_reduction_passes_tiny_inputs_through(size):
     embeddings = np.ones((size, 16))
 
     assert len(reduce_embedding_dimensions(embeddings, dim=4)) == size
+
+
+def test_duplicate_embeddings_each_land_in_a_cluster(monkeypatch):
+    from raptor_qdrant.rag.builder.cluster import raptor_clustering
+
+    embeddings = np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    monkeypatch.setattr(
+        raptor_clustering, "reduce_embedding_dimensions", lambda emb, dim: emb
+    )
+    monkeypatch.setattr(
+        raptor_clustering,
+        "gmm_soft_cluster",
+        lambda emb, threshold: ([np.array([0])] * len(emb), 1),
+    )
+
+    labels = raptor_clustering.RaptorClustering(
+        reduction_dimension=10
+    )._hierarchical_cluster(embeddings)
+
+    assert [label.tolist() for label in labels] == [[0.0], [0.0], [0.0]]

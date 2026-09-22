@@ -144,3 +144,28 @@ def test_tick_runs_periodically_while_watching(tmp_path):
     )
 
     assert len(ticks) >= 3
+
+
+def test_a_busy_file_does_not_hold_back_a_settled_one():
+    import time
+
+    handler, seen, _ = collect(debounce=60)
+
+    handler.on_any_event(FakeEvent("/vault/quiet.md"))
+    handler._deadlines[Path("/vault/quiet.md")] = time.monotonic()
+    handler.on_any_event(FakeEvent("/vault/busy.md"))
+
+    handler._sweep()
+
+    assert seen == [{Path("/vault/quiet.md")}]
+    assert Path("/vault/busy.md") in handler._deadlines
+
+
+def test_a_still_busy_file_keeps_waiting():
+    handler, seen, _ = collect(debounce=60)
+
+    handler.on_any_event(FakeEvent("/vault/busy.md"))
+    handler._sweep()
+
+    assert seen == []
+    assert Path("/vault/busy.md") in handler._deadlines
