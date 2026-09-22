@@ -376,8 +376,35 @@ def run_ask(engine: RaptorEngine, args: argparse.Namespace) -> int:
     return 0
 
 
+def refuse_if_unstable(engine: RaptorEngine) -> bool:
+    """인덱스가 재는 도중에 흔들리고 있으면 막고 True 를 돌려준다.
+
+    재구축은 새 세대를 얹고 끝날 때 옛 세대를 지운다. 그 사이 컬렉션에는
+    같은 볼트가 두 벌 들어 있어서 무엇을 재든 뜻이 없다. 끝나지 않은 빌드가
+    남긴 세대도 마찬가지다.
+    """
+    if refuse_if_building(
+        build_lock(engine.collection_name), engine.collection_name
+    ):
+        return True
+
+    health = engine.drift()
+    if health.has_mixed_generations:
+        logger.error(
+            f"'{engine.collection_name}' has {health.generations} tree "
+            "generations mixed. an unfinished or running build leaves both "
+            "trees in place and any measurement on it is meaningless. "
+            "run `index` to rebuild, or wait for the running one"
+        )
+        return True
+    return False
+
+
 def run_eval(engine: RaptorEngine, args: argparse.Namespace) -> int:
     """평가셋으로 검색을 재고 결과를 출력한다."""
+    if refuse_if_unstable(engine):
+        return 1
+
     path = dataset_path(engine.collection_name)
 
     if args.build:

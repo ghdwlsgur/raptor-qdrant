@@ -119,3 +119,38 @@ def test_a_chunk_under_the_cap_is_untouched():
     pieces = split_oversized([node(BODY)], max_tokens=4096)
 
     assert [p.get_content() for p in pieces] == [BODY]
+
+
+def test_semantic_splitting_is_off_by_default():
+    from fakes import CountingEmbedding
+    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
+
+    assert not HybridChunker(CountingEmbedding()).semantic
+
+
+def test_the_setting_turns_semantic_splitting_on(monkeypatch):
+    from fakes import CountingEmbedding
+    from raptor_qdrant.core.config import settings
+    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
+
+    monkeypatch.setattr(settings, "SEMANTIC_CHUNKING", True)
+
+    assert HybridChunker(CountingEmbedding()).semantic
+    assert not HybridChunker(CountingEmbedding(), semantic=False).semantic
+
+
+def test_a_long_section_is_cut_by_length_without_the_embedder():
+    from fakes import CountingEmbedding
+    from raptor_qdrant.rag.chunker.hybrid_chunker import HybridChunker
+
+    model = CountingEmbedding()
+    long_note = (
+        "# 제목\n\n" + "이 문장은 길이 기준 분할을 확인하려고 적는다. " * 120
+    )
+
+    nodes = HybridChunker(model, max_tokens=200).chunk(long_note)
+
+    assert len(nodes) > 1
+    assert all(count_tokens(n.get_content()) <= 200 for n in nodes)
+    # 의미 분할을 껐으므로 임베딩을 한 번도 부르지 않는다
+    assert model.batches == [] and model.singles == 0

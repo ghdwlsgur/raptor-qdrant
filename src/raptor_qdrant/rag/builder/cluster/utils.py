@@ -16,6 +16,7 @@ def reduce_embedding_dimensions(
     dim: int,
     n_neighbors: int | None = None,
     metric: str = "cosine",
+    random_state: int = RANDOM_SEED,
 ) -> np.ndarray:
     """고차원의 복잡한 임베딩 데이터를 UMAP라는 알고리즘을 사용해
     저차원의 단순한 데이터로 '압축' 또는 '요약'하는 역할을 수행
@@ -47,6 +48,7 @@ def reduce_embedding_dimensions(
         n_neighbors=n_neighbors,  # 시야 설정 (현미경 vs 망원경)
         n_components=dim,  # 목표 차원 설정
         metric=metric,  # 원본 공간에서의 거리 측정 방식 (e.g., 코사인, 유클리드...)
+        random_state=random_state,  # 같은 볼트는 같은 트리로
     ).fit_transform(embeddings)  # 학습 및 변환 실행
 
     # 저차원으로 축소된 임베딩 반환
