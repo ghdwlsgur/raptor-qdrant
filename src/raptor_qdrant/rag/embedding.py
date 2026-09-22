@@ -11,7 +11,10 @@ if TYPE_CHECKING:
     from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from raptor_qdrant.core.config import settings
-from raptor_qdrant.rag.constants import EMBEDDING_BATCH_SIZE
+from raptor_qdrant.rag.constants import (
+    CPU_EMBEDDING_BATCH_SIZE,
+    EMBEDDING_BATCH_SIZE,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
@@ -39,6 +42,15 @@ def shared_model[T](
 
 _LLAMA_HANDLES: dict[str, Any] = {}
 _SENTENCE_TRANSFORMERS: dict[str, Any] = {}
+
+
+def embedding_batch_size() -> int:
+    """장치에 맞는 배치 크기."""
+    return (
+        CPU_EMBEDDING_BATCH_SIZE
+        if embedding_device() == "cpu"
+        else EMBEDDING_BATCH_SIZE
+    )
 
 
 def embedding_device() -> str | None:
@@ -184,7 +196,7 @@ class KoreanEmbeddingModel(BaseEmbeddingModel):
 
         try:
             embeddings = self.model.encode(
-                texts, batch_size=EMBEDDING_BATCH_SIZE, convert_to_numpy=True
+                texts, batch_size=embedding_batch_size(), convert_to_numpy=True
             )
             return [vector.tolist() for vector in embeddings]
         except Exception as e:
